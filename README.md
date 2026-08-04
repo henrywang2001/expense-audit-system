@@ -2,6 +2,8 @@
 
 基于 AI Agent 技术的智能化财务报销审核系统，集成 LLM 大模型、RAG 知识检索、**LangGraph StateGraph 工作流编排**、LangChain 框架，实现报销单据的智能识别、规则校验、风险预警和自动化审批流程。
 
+> **2026-08-04 更新**：完成并发安全 + 幂等去重 + 事务拆分改造，补齐状态机、乐观锁、缓存三大漏洞。详见 [并发/幂等/事务改造说明](#并发幂等事务安全改造)。
+
 ## 技术栈
 
 | 技术组件 | 版本 | 用途 |
@@ -30,6 +32,7 @@
 5. **风险评估预警**：智能识别异常报销和潜在风险
 6. **审批流程自动化**：根据规则自动流转审批流程
 7. **数据统计分析**：报销数据的多维度统计和分析
+8. **🆕 并发安全保护**：乐观锁 + 状态机校验 + 幂等去重 + 事务拆分
 
 ## 项目结构
 
@@ -39,13 +42,33 @@ expense-audit-system/
 │   ├── app/
 │   │   ├── main.py            # FastAPI应用入口
 │   │   ├── config.py          # 配置管理
+│   │   ├── dependencies.py    # 依赖注入（DB会话）
 │   │   ├── api/               # API路由
 │   │   │   └── v1/            # API v1 接口
-│   │   ├── core/              # 核心模块（安全/异常）
+│   │   │       ├── agent.py   # Agent工作流接口 ★
+│   │   │       ├── expense.py # 报销CRUD + AI审核接口
+│   │   │       ├── approval.py# 审批流程接口
+│   │   │       ├── auth.py    # 认证接口
+│   │   │       └── report.py  # 报表接口
+│   │   ├── core/              # 核心模块
+│   │   │   ├── security.py    # JWT安全
+│   │   │   ├── exceptions.py  # 自定义异常（含ConflictException）
+│   │   │   └── idempotency.py # ★ 幂等缓存（并发去重）
 │   │   ├── models/            # SQLAlchemy 数据模型
+│   │   │   ├── base.py        # 基类 + init_db + 列迁移
+│   │   │   ├── user.py        # 用户模型
+│   │   │   ├── expense.py     # ★ 报销单（含version乐观锁 + ai_review_status）
+│   │   │   ├── rule.py        # 规则/审批/审计日志
+│   │   │   └── idempotency.py # ★ 幂等缓存表 AIReviewCache
 │   │   ├── schemas/           # Pydantic 序列化模型
+│   │   │   ├── expense.py     # ★ AIReviewRequest（含idempotency_key）
+│   │   │   ├── agent.py       # ★ AgentExecuteRequest（含idempotency_key）
+│   │   │   └── ...
 │   │   ├── services/          # 业务服务层
-│   │   ├── agents/            # AI Agent 模块 ★
+│   │   │   ├── expense_service.py # ★ ai_review 重写（4 Phase并发安全）
+│   │   │   ├── approval_service.py
+│   │   │   └── ...
+│   │   ├── agents/            # AI Agent 模块
 │   │   │   ├── base_agent.py       # Agent 基类（结构化输出）
 │   │   │   ├── document_agent.py   # 文档解析 Agent
 │   │   │   ├── rule_agent.py       # 规则校验 Agent
@@ -53,18 +76,18 @@ expense-audit-system/
 │   │   │   ├── rag_agent.py        # RAG 检索 Agent
 │   │   │   ├── decision_agent.py   # 决策生成 Agent (fail-review)
 │   │   │   ├── workflow.py         # 工作流 facade (LangGraph入口)
-│   │   │   └── graph/              # LangGraph StateGraph ★
+│   │   │   └── graph/              # LangGraph StateGraph
 │   │   │       ├── state.py        # AuditState TypedDict
 │   │   │       ├── nodes.py        # 5个节点工厂函数
 │   │   │       └── builder.py      # StateGraph构建器（条件路由+Send并行）
 │   │   ├── rag/               # RAG模块（向量存储/检索/嵌入）
 │   │   ├── tools/             # Agent工具（OCR/通知/数据库）
 │   │   └── utils/             # 工具函数
-│   ├── tests/                 # 测试 ★
+│   ├── tests/                 # ★ 测试
 │   │   ├── conftest.py             # 共享 fixtures
-│   │   ├── test_workflow_routing.py # 条件路由测试
-│   │   ├── test_graph.py           # 图编译/结构测试
-│   │   └── test_api_regression.py  # API回归测试
+│   │   ├── test_workflow_routing.py # 条件路由测试 (13 tests)
+│   │   ├── test_graph.py           # 图编译/结构测试 (10 tests)
+│   │   └── test_api_regression.py  # ★ API回归测试 (13 tests)
 │   └── requirements.txt       # 依赖清单
 ├── frontend/                  # 前端项目
 │   ├── src/
@@ -79,8 +102,10 @@ expense-audit-system/
 │   ├── package.json
 │   └── vite.config.ts
 ├── 运行指南.md                 # 运行部署指南
-└── README.md                  # 项目说明
+└── README.md                  # 项目说明（本文件）
 ```
+
+*★ 标记为本次并发幂等改造涉及的文件*
 
 ## AI Agent 工作流架构
 
@@ -159,6 +184,100 @@ expense-audit-system/
 
 所有 5 个 Agent 使用 `response_format={"type": "json_object"}` 强制 LLM 返回合法 JSON，替代旧版的正则 `response.find("{")...json.loads` 兜底模式，提升输出可靠性。
 
+## 并发/幂等/事务安全改造 🆕
+
+### 问题背景
+
+| 问题 | 根因 | 严重程度 |
+|------|------|:---:|
+| 已审批单点 AI 审核 → 被打回 PENDING | `ai_review` 无状态前置检查 | 🔴 状态机破坏 |
+| 并发点两次 → 互相覆盖审核结果 | 无乐观锁/版本号 | 🔴 数据竞争 |
+| 重复点击 → 重跑 5 次 LLM + 重复审计日志 | 无幂等键去重 | 🟡 资源浪费 |
+| 几十秒 LLM 调用全程持 DB 事务 | SQLite 单写者阻塞所有表 | 🔴 锁库风险 |
+| 两个 API 端点行为不一致 | `agent/execute` 绕过 `ExpenseService` | 🟡 代码分裂 |
+
+### 改造架构
+
+```
+POST /agent/execute   ──┐
+                         ├──→ ExpenseService.ai_review() 统一入口
+POST /expense/{id}/ai-review ─┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+   Phase 0: 幂等快路     Phase 1: 短事务       Phase 2: LLM（事务外）
+   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+   │ idempotency   │    │ ① 状态门禁    │    │ AgentWorkflow │
+   │ _key 查缓存   │    │    DRAFT      │    │ .execute()   │
+   │   → hit: 返回  │    │    PENDING   │    │ (30s, 不持锁) │
+   │   → miss: 继续  │    │    才放行     │    └──────┬───────┘
+   └──────────────┘    │ ② 乐观锁校验   │           │
+                        │    WHERE       │    ┌──────▼───────┐
+                        │    version=?   │    │ 异常: 清除    │
+                        │ ③ 标记 running │    │ running→failed│
+                        │    → COMMIT    │    └──────────────┘
+                        └──────────────┘
+                               │
+               ┌───────────────┼───────────────┐
+               ▼                               ▼
+        Phase 3: 短事务                  Phase 4: 幂等缓存
+        ┌──────────────┐                ┌──────────────┐
+        │ 乐观锁写回     │                │ INSERT 缓存   │
+        │ WHERE version=?│               │ UNIQUE 去重   │
+        │ + 审计日志     │                │ (独立事务)     │
+        │ → COMMIT      │                └──────────────┘
+        └──────────────┘
+```
+
+### 三层防护对照
+
+| 层级 | 手段 | 防御场景 | 文件 |
+|------|------|----------|------|
+| **状态机** | `ALLOWED_STATUSES` 前置校验 + `ai_review_status == "running"` 检查 | 已审批单不被回退 / 同一单不并发跑两次 | `expense_service.py` |
+| **乐观锁** | `version` 字段 + `WHERE version=?` + `rowcount` 校验 | 并发更新互相覆盖 | `expense.py` / `expense_service.py` |
+| **幂等键** | `idempotency_key` + 缓存表 `AIReviewCache` (5min TTL) | 重复请求不重跑 LLM / 不产生重复日志 | `idempotency.py` / `schemas/` |
+
+### 事务拆分示意
+
+```
+改前：单个大事务
+  ┌──────────────────────────────────────────────────────────┐
+  │ BEGIN → SELECT → ... 30s LLM 调用 ... → UPDATE → COMMIT  │
+  │         ↑________________ 全程持锁 ___________________↑   │
+  └──────────────────────────────────────────────────────────┘
+
+改后：三个短事务
+  ┌────────────┐         ┌────────────┐         ┌────────────┐
+  │ COMMIT ①   │  30s    │ COMMIT ③   │         │ COMMIT ④   │
+  │ 状态门禁    │ ──→    │ 乐观锁写回   │  ──→   │ 幂等缓存    │
+  │ 标记running │  LLM   │ 审计日志     │         │ (独立)      │
+  └────────────┘  (无锁) └────────────┘         └────────────┘
+```
+
+> **关键收益**：SQLite 写入锁持有时长从 **30+ 秒** 降至 **毫秒级**，其他用户的报销操作不再被 AI 审核阻塞。
+
+### 新增模型字段
+
+| Expense 模型 | 类型 | 默认值 | 用途 |
+|-------------|------|--------|------|
+| `version` | `Integer` | `1` | 乐观锁版本号，每次 AI 审核成功后 +1 |
+| `ai_review_status` | `String(20)` | `NULL` | AI 审核运行态：`running` / `done` / `failed` |
+
+| AIReviewCache 模型（新表） | 类型 | 用途 |
+|---------------------------|------|------|
+| `expense_id` + `idempotency_key` | `UNIQUE` 约束 | 幂等去重，5 分钟 TTL |
+| `result_json` | `Text` | 缓存的审核结果 JSON |
+
+### 验证清单
+
+| # | 场景 | 预期结果 | 验证方式 |
+|---|------|----------|----------|
+| 1 | APPROVED 单调用 AI 审核 | 409 ConflictException | `POST /expense/{id}/ai-review` |
+| 2 | 同一单并发发 2 个请求（无幂等键） | 一个成功、一个 409 | 并发请求测试 |
+| 3 | 同一单带相同 `idempotency_key` 发 2 次 | 第 2 次返回缓存，审计日志仅 1 条 | 幂等测试 |
+| 4 | workflow 抛异常 | `ai_review_status` 回滚为 `failed` | Mock 异常测试 |
+| 5 | 正常流程 DRAFT→AI审核→PENDING | 全流程通过 | 端到端测试 |
+
 ## 快速开始
 
 详细的安装和运行步骤请参阅 [运行指南.md](./运行指南.md)
@@ -199,7 +318,8 @@ pytest tests/ -v
 
 test_workflow_routing.py (13 tests)  — 条件路由 + enabled_agents
 test_graph.py          (10 tests)  — 图编译 + Send并行 + 节点工厂
-test_api_regression.py (13 tests)  — API回归 + fail-closed
+test_api_regression.py (13 tests)  — API回归 + fail-closed + 两入口统一
+test_conftest.py       (2 tests)   — fixtures
 ```
 
 ## 模型配置

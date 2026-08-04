@@ -168,6 +168,18 @@ class Expense(BaseModel):
         nullable=True,
         comment="AI审核结果详情（JSON）"
     )
+    # --- 并发/幂等字段 ---
+    version = Column(
+        Integer,
+        nullable=False,
+        default=1,
+        comment="乐观锁版本号，用于并发更新冲突检测"
+    )
+    ai_review_status = Column(
+        String(20),
+        nullable=True,
+        comment="AI审核运行状态: running / done / failed"
+    )
 
     # 关联
     user = relationship("User", lazy="joined")

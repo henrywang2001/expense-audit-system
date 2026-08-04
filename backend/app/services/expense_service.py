@@ -4,17 +4,19 @@
 import os
 import uuid
 import math
+import logging
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 from fastapi import UploadFile
-from sqlalchemy import select, func, desc, asc, or_, and_
+from sqlalchemy import select, update, func, desc, asc, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.core.exceptions import (
-    NotFoundException, ForbiddenException, ExpenseStatusException, BadRequestException
+    NotFoundException, ForbiddenException, ExpenseStatusException, BadRequestException,
+    ConflictException,
 )
 from app.models.user import User
 from app.models.expense import (
@@ -22,6 +24,8 @@ from app.models.expense import (
 )
 from app.models.rule import AuditLog
 from app.schemas.expense import ExpenseCreate, ExpenseUpdate, AIReviewRequest
+
+logger = logging.getLogger(__name__)
 
 
 class ExpenseService:
@@ -318,32 +322,143 @@ class ExpenseService:
     async def ai_review(
         self, expense_id: int, user: User, request: AIReviewRequest
     ) -> dict:
-        """执行AI智能审核"""
+        """
+        执行 AI 智能审核（并发安全 + 幂等 + 乐观锁 + 事务拆分版）
+
+        流程分四阶段：
+          Phase 0: 幂等缓存快路 — 命中直接返回，不重跑 LLM
+          Phase 1: 短事务 — 状态校验 + 标记 running + commit 释放
+          Phase 2: LLM 调用 — 在事务外，不持有 DB 锁
+          Phase 3: 短事务 — 乐观锁写回结果 + 审计日志 + commit
+          Phase 4: 写入幂等缓存（独立事务）
+        """
+        from app.agents.workflow import AgentWorkflow
+        from app.core.idempotency import get_cached_review, cache_review
+
+        # ===== Phase 0: 幂等缓存快路 =====
+        if request.idempotency_key:
+            cached = await get_cached_review(
+                self.db, expense_id, request.idempotency_key
+            )
+            if cached is not None:
+                return cached
+
+        # ===== Phase 1: 短事务 — 读取 + 状态门禁 + 标记 running =====
         expense = await self._get_expense_with_relations(expense_id)
         if not expense:
             raise NotFoundException(message="报销单不存在")
 
-        # 启动AI Agent工作流审核
-        from app.agents.workflow import AgentWorkflow
-        workflow = AgentWorkflow(self.db, user)
-        result = await workflow.execute(
-            expense_id=expense_id,
-            custom_context=request.custom_rules,
+        # ① 状态转移前置校验：只允许 DRAFT / PENDING 触发 AI 审核
+        ALLOWED_STATUSES = {ExpenseStatus.DRAFT, ExpenseStatus.PENDING}
+        if expense.status not in ALLOWED_STATUSES:
+            raise ConflictException(
+                message=(
+                    f"报销单当前状态为「{expense.status.value}」，"
+                    f"只有「草稿」或「待审核」状态的报销单可以触发 AI 审核"
+                )
+            )
+
+        # ①-bis: 防止并发重复触发（配合乐观锁形成双重防护）
+        if expense.ai_review_status == "running":
+            raise ConflictException(
+                message="该报销单正在 AI 审核中，请稍后再试"
+            )
+
+        # ② 乐观锁：记录当前版本号，在 Phase 3 写回时校验
+        snapshot_version = expense.version
+
+        # 标记 running 并立即提交（手动 UPDATE + WHERE version 防止并发）
+        stmt_mark = (
+            update(Expense)
+            .where(
+                Expense.id == expense_id,
+                Expense.version == snapshot_version,
+            )
+            .values(
+                ai_review_status="running",
+                version=Expense.version + 1,
+            )
         )
+        mark_result = await self.db.execute(stmt_mark)
+        if mark_result.rowcount == 0:
+            await self.db.rollback()
+            raise ConflictException(
+                message="数据版本冲突，可能已被其他请求修改，请刷新后重试"
+            )
 
-        # 将AI审核结果保存到报销单
-        expense.ai_review_result = result
-        if result.get("risk_level"):
-            expense.risk_level = result["risk_level"]
-        if result.get("risk_score") is not None:
-            expense.risk_score = result["risk_score"]
+        await self.db.commit()  # ← 关键：短事务立即提交，释放 SQLite 写锁
 
-        expense.status = ExpenseStatus.PENDING
+        # ===== Phase 2: 长耗时 LLM 调用（在事务外，不持有 DB 锁） =====
+        try:
+            workflow = AgentWorkflow(self.db, user)
+            result = await workflow.execute(
+                expense_id=expense_id,
+                enabled_agents=request.enabled_agents,
+                custom_context=request.custom_rules,
+            )
+        except Exception as exc:
+            # 异常回滚：清除 running 状态，防止死锁前端
+            logger.error(
+                f"[AI Review] workflow 执行异常 expense={expense_id}: {exc}",
+                exc_info=True,
+            )
+            try:
+                stmt_fail = (
+                    update(Expense)
+                    .where(Expense.id == expense_id)
+                    .values(ai_review_status="failed")
+                )
+                await self.db.execute(stmt_fail)
+                await self.db.commit()
+            except Exception as cleanup_exc:
+                logger.error(
+                    f"[AI Review] 清除 running 状态失败 expense={expense_id}: "
+                    f"{cleanup_exc}"
+                )
+                await self.db.rollback()
+            raise  # 重新抛出原始异常
+
+        # ===== Phase 3: 短事务 — 乐观锁写回结果 =====
+        # Phase 1 已设 version=snapshot_version+1，这里直接校验该版本
+        current_version = snapshot_version + 1
+
+        risk_level = result.get("risk_level")
+        risk_score = result.get("risk_score")
+
+        stmt_update = (
+            update(Expense)
+            .where(
+                Expense.id == expense_id,
+                Expense.version == current_version,  # ② 乐观锁校验
+            )
+            .values(
+                status=ExpenseStatus.PENDING,
+                ai_review_result=result,
+                risk_level=risk_level,
+                risk_score=risk_score,
+                version=Expense.version + 1,
+                ai_review_status="done",
+            )
+        )
+        update_result = await self.db.execute(stmt_update)
+        if update_result.rowcount == 0:
+            await self.db.rollback()
+            raise ConflictException(
+                message="审核结果写入冲突（数据版本已变化），请刷新后重试"
+            )
+
+        # 审计日志与结果写入在同一事务内（原子性）
         self._add_audit_log(
             expense_id, "ai_review", user.id,
-            {"risk_level": result.get("risk_level"), "risk_score": result.get("risk_score")}
+            {"risk_level": risk_level, "risk_score": risk_score}
         )
-        await self.db.flush()
+        await self.db.commit()
+
+        # ===== Phase 4: 写入幂等缓存（独立事务，失败不影响业务） =====
+        if request.idempotency_key:
+            await cache_review(
+                self.db, expense_id, request.idempotency_key, result
+            )
 
         return result
 

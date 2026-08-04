@@ -25,6 +25,9 @@ class AgentExecuteRequest(BaseModel):
         None,
         description="自定义上下文信息"
     )
+    idempotency_key: Optional[str] = Field(
+        None, description="幂等键（客户端生成UUID），相同键在5分钟内重复提交直接返回缓存结果"
+    )
 
 
 class AgentExecuteResponse(BaseModel):

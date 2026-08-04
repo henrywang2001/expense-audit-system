@@ -56,7 +56,7 @@ class BaseModel(Base, TimestampMixin):
 
 def init_db():
     """初始化数据库，创建所有表"""
-    from sqlalchemy import create_engine
+    from sqlalchemy import create_engine, inspect, text
     from app.config import settings
     import os
 
@@ -78,6 +78,33 @@ def init_db():
     import app.models.user  # noqa
     import app.models.expense  # noqa
     import app.models.rule  # noqa
+    import app.models.idempotency  # noqa
 
     Base.metadata.create_all(bind=engine)
+
+    # —— 迁移：为旧数据库补加缺失的列（幂等操作） ——
+    _migrate_expense_columns(engine)
+
     return engine
+
+
+def _migrate_expense_columns(engine):
+    """为旧数据库补加缺失的列（幂等：存在则跳过）"""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "expenses" not in insp.get_table_names():
+        return
+
+    existing_cols = {c["name"] for c in insp.get_columns("expenses")}
+
+    with engine.connect() as conn:
+        if "version" not in existing_cols:
+            conn.execute(text(
+                "ALTER TABLE expenses ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+            ))
+        if "ai_review_status" not in existing_cols:
+            conn.execute(text(
+                "ALTER TABLE expenses ADD COLUMN ai_review_status VARCHAR(20)"
+            ))
+        conn.commit()

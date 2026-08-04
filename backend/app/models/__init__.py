@@ -3,6 +3,7 @@ from app.models.base import Base
 from app.models.user import User
 from app.models.expense import Expense, ExpenseItem, Category
 from app.models.rule import Rule, ApprovalFlow, Approval, AuditLog
+from app.models.idempotency import AIReviewCache
 
 __all__ = [
     "Base",
@@ -14,4 +15,5 @@ __all__ = [
     "ApprovalFlow",
     "Approval",
     "AuditLog",
+    "AIReviewCache",
 ]

@@ -8,7 +8,8 @@ from app.api.deps import get_current_user, get_admin_or_finance_user
 from app.dependencies import get_db
 from app.models.user import User
 from app.schemas.agent import AgentExecuteRequest, AgentExecuteResponse
-from app.agents.workflow import AgentWorkflow
+from app.schemas.expense import AIReviewRequest
+from app.services.expense_service import ExpenseService
 
 router = APIRouter()
 
@@ -20,7 +21,13 @@ async def execute_agent_workflow(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    对指定报销单执行完整的AI Agent审核工作流
+    对指定报销单执行完整的 AI Agent 审核工作流。
+
+    委托给 ExpenseService.ai_review() 统一处理：
+    - 状态转移前置校验（仅 DRAFT/PENDING 可审核）
+    - 幂等键去重（相同 idempotency_key 直接返回缓存）
+    - 乐观锁并发控制（version 字段校验）
+    - 事务拆分（LLM 调用不持有 DB 事务）
 
     工作流包含以下步骤：
     1. 文档解析 - 提取发票和费用信息
@@ -29,10 +36,15 @@ async def execute_agent_workflow(
     4. 知识检索 - 检索相似案例和规则
     5. 决策生成 - 给出审批建议
     """
-    workflow = AgentWorkflow(db, current_user)
-    result = await workflow.execute(
+    service = ExpenseService(db)
+    result = await service.ai_review(
         expense_id=request.expense_id,
-        enabled_agents=request.enabled_agents,
-        custom_context=request.custom_context,
+        user=current_user,
+        request=AIReviewRequest(
+            expense_id=request.expense_id,
+            custom_rules=request.custom_context,
+            idempotency_key=request.idempotency_key,
+            enabled_agents=request.enabled_agents,
+        ),
     )
     return result

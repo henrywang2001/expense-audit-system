@@ -212,15 +212,15 @@ class TestCallSiteCompatibility:
     """两个调用入口的兼容性测试"""
 
     def test_api_agent_imports_workflow(self):
-        """api/v1/agent.py 正确导入 AgentWorkflow"""
+        """api/v1/agent.py 委托给 ExpenseService.ai_review() 统一处理"""
         from app.api.v1.agent import execute_agent_workflow
         import inspect
 
         source = inspect.getsource(execute_agent_workflow)
-        assert "AgentWorkflow" in source, \
-            "api/v1/agent.py should reference AgentWorkflow"
-        assert ".execute(" in source, \
-            "api/v1/agent.py should call workflow.execute()"
+        assert "ExpenseService" in source, \
+            "api/v1/agent.py should reference ExpenseService"
+        assert ".ai_review(" in source, \
+            "api/v1/agent.py should call service.ai_review()"
 
     def test_expense_service_imports_workflow(self):
         """expense_service.py 正确导入 AgentWorkflow"""

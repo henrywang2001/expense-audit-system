@@ -107,6 +107,12 @@ class AIReviewRequest(BaseModel):
     expense_id: int = Field(..., description="报销单ID")
     include_history: bool = Field(default=False, description="是否包含历史记录分析")
     custom_rules: Optional[dict] = Field(None, description="自定义审核规则")
+    idempotency_key: Optional[str] = Field(
+        None, description="幂等键（客户端生成UUID），相同键在5分钟内重复提交直接返回缓存结果"
+    )
+    enabled_agents: Optional[List[str]] = Field(
+        None, description="指定启用的Agent列表，不传则启用全部"
+    )
 
 
 class AIReviewResponse(BaseModel):
