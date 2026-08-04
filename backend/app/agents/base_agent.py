@@ -3,6 +3,7 @@ AI Agent 基类
 基于 DeepSeek LLM 的智能审核 Agent，所有专用 Agent 继承此类
 """
 import time
+import json
 import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List, Callable
@@ -52,6 +53,7 @@ class BaseAgent(ABC):
             model_name=settings.MODEL_NAME,
             temperature=temperature if temperature is not None else settings.TEMPERATURE,
             max_tokens=max_tokens if max_tokens is not None else settings.MAX_TOKENS,
+            model_kwargs={"response_format": {"type": "json_object"}},
         )
 
         # 设置系统消息
@@ -91,6 +93,53 @@ class BaseAgent(ABC):
         except Exception as e:
             logger.error(f"[{self.name}] LLM 调用失败: {e}")
             raise
+
+    async def chat_json(self, user_message: str) -> dict:
+        """
+        调用 LLM 并强制返回 JSON
+
+        通过 model_kwargs 在初始化时设置 response_format={"type": "json_object"}，
+        DeepSeek API 兼容此 OpenAI 参数，LLM 会保证返回有效 JSON。
+
+        如果 JSON 解析仍然失败（极端情况），抛出 ValueError 而非静默降级。
+
+        Args:
+            user_message: 用户消息
+
+        Returns:
+            解析后的 JSON dict
+
+        Raises:
+            ValueError: LLM 返回了非 JSON 格式的文本
+        """
+        self.messages.append(HumanMessage(content=user_message))
+
+        try:
+            response = await self.llm.ainvoke(self.messages)
+        except Exception as e:
+            logger.error(f"[{self.name}] LLM 调用失败: {e}")
+            raise
+
+        self.messages.append(AIMessage(content=response.content))
+        raw_text = response.content
+
+        # JSON mode 保障下应始终返回有效 JSON，但仍保留兜底解析
+        try:
+            return json.loads(raw_text)
+        except json.JSONDecodeError:
+            # 极端情况：尝试提取 JSON 子串
+            json_start = raw_text.find("{")
+            json_end = raw_text.rfind("}") + 1
+            if json_start >= 0 and json_end > json_start:
+                try:
+                    return json.loads(raw_text[json_start:json_end])
+                except json.JSONDecodeError:
+                    pass
+            # 彻底失败 → 抛出异常，由节点层捕获
+            raise ValueError(
+                f"[{self.name}] LLM 未返回有效 JSON。"
+                f"前 500 字符: {raw_text[:500]}"
+            )
 
     def get_system_prompt(self) -> str:
         """获取系统提示词"""

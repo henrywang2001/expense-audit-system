@@ -29,6 +29,7 @@ DOCUMENT_AGENT_PROMPT = """你是一个专业的财务文档解析助手。你�
 - 金额统一转换为数字类型
 - 日期格式统一为 YYYY-MM-DD
 - 如果有多项商品，请以数组形式返回
+- 请严格按照JSON格式返回结果，不要包含任何JSON之外的解释文字。
 """
 
 
@@ -87,20 +88,11 @@ class DocumentAgent(BaseAgent):
 
             # 调用LLM解析
             self.clear_memory()
-            response = await self.chat(prompt)
-
-            # 尝试解析JSON结果
             try:
-                # 提取响应中的JSON部分
-                json_start = response.find("{")
-                json_end = response.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_str = response[json_start:json_end]
-                    parsed_result = json.loads(json_str)
-                else:
-                    parsed_result = {"raw_response": response}
-            except json.JSONDecodeError:
-                parsed_result = {"raw_response": response, "parse_error": "JSON解析失败"}
+                parsed_result = await self.chat_json(prompt)
+            except ValueError as e:
+                logger.warning(f"[{self.name}] JSON 解析失败，使用兜底: {e}")
+                parsed_result = {"raw_response": str(e)}
 
             return self._build_result(
                 status="success",
@@ -115,6 +107,6 @@ class DocumentAgent(BaseAgent):
             logger.error(f"[{self.name}] 解析失败: {e}", exc_info=True)
             return self._build_result(
                 status="failed",
-                result={"error": str(e)},
+                result={"error": str(e), "extracted_data": {}},
                 message=f"文档解析失败: {str(e)}",
             )

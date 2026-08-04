@@ -19,7 +19,9 @@ RAG_AGENT_PROMPT = """你是一个知识检索助手，专门帮助检索与财�
 4. 提供相关法规和合规要求参考
 5. 总结对当前报销单审核有参考价值的信息
 
-请以JSON格式返回检索和总结的结果。"""
+请以JSON格式返回检索和总结的结果。
+
+请严格按照JSON格式返回结果，不要包含任何JSON之外的解释文字。"""
 
 
 class RAGAgent(BaseAgent):
@@ -82,17 +84,11 @@ class RAGAgent(BaseAgent):
 
 请总结这些信息对当前报销单审核的参考价值，以JSON格式返回。"""
                 self.clear_memory()
-                response = await self.chat(prompt)
-
                 try:
-                    json_start = response.find("{")
-                    json_end = response.rfind("}") + 1
-                    if json_start >= 0 and json_end > json_start:
-                        summary = json.loads(response[json_start:json_end])
-                    else:
-                        summary = {"raw_response": response}
-                except json.JSONDecodeError:
-                    summary = {"raw_response": response}
+                    summary = await self.chat_json(prompt)
+                except ValueError as e:
+                    logger.warning(f"[{self.name}] JSON 解析失败，使用兜底: {e}")
+                    summary = {"raw_response": str(e)}
             else:
                 summary = {"note": "知识库暂无相关内容"}
 

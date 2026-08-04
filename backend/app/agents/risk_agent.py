@@ -32,7 +32,9 @@ RISK_AGENT_PROMPT = """你是一个专业的财务风险评估分析师。你需
 - risk_level: 风险等级 (low/medium/high/critical)
 - dimension_scores: 各维度评分
 - risk_factors: 识别到的风险因素列表
-- recommendations: 建议措施列表"""
+- recommendations: 建议措施列表
+
+请严格按照JSON格式返回结果，不要包含任何JSON之外的解释文字。"""
 
 
 class RiskAgent(BaseAgent):
@@ -99,18 +101,11 @@ class RiskAgent(BaseAgent):
 请对上述报销单进行全面的风险评估，按评分标准给出各维度评分和综合结论。"""
 
             self.clear_memory()
-            response = await self.chat(prompt)
-
-            # 解析JSON结果
             try:
-                json_start = response.find("{")
-                json_end = response.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    parsed = json.loads(response[json_start:json_end])
-                else:
-                    parsed = {"raw_response": response}
-            except json.JSONDecodeError:
-                parsed = {"raw_response": response}
+                parsed = await self.chat_json(prompt)
+            except ValueError as e:
+                logger.warning(f"[{self.name}] JSON 解析失败，使用兜底: {e}")
+                parsed = {"raw_response": str(e)}
 
             # 提取风险等级和分数
             risk_level = parsed.get("risk_level", "low")
@@ -144,8 +139,17 @@ class RiskAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"[{self.name}] 风险评估失败: {e}", exc_info=True)
+            # fail-closed: 异常当最高风险，不低估风险
             return self._build_result(
                 status="failed",
-                result={"error": str(e), "risk_level": "low", "risk_score": 0},
-                message=f"风险评估失败: {str(e)}",
+                result={
+                    "error": str(e),
+                    "risk_level": "critical",
+                    "risk_score": 100,
+                    "dimension_scores": {},
+                    "risk_factors": [f"风险评估系统异常，自动标记为高风险需人工复核: {str(e)}"],
+                    "recommendations": ["系统异常，建议人工逐一复核所有风险维度"],
+                    "full_analysis": {},
+                },
+                message=f"风险评估异常(已标记为critical): {str(e)}",
             )

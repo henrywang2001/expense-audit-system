@@ -33,7 +33,9 @@ RULE_AGENT_PROMPT = """你是一个专业的财务规则审核助手。你需要
 - 风险等级: low / medium / high
 - 建议处理方式
 
-请以JSON格式返回检查结果。"""
+请以JSON格式返回检查结果。
+
+请严格按照JSON格式返回结果，不要包含任何JSON之外的解释文字。"""
 
 
 class RuleAgent(BaseAgent):
@@ -110,18 +112,11 @@ class RuleAgent(BaseAgent):
 
             # 调用LLM进行规则校验
             self.clear_memory()
-            response = await self.chat(prompt)
-
-            # 解析结果
             try:
-                json_start = response.find("{")
-                json_end = response.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    parsed = json.loads(response[json_start:json_end])
-                else:
-                    parsed = {"raw_response": response}
-            except json.JSONDecodeError:
-                parsed = {"raw_response": response}
+                parsed = await self.chat_json(prompt)
+            except ValueError as e:
+                logger.warning(f"[{self.name}] JSON 解析失败，使用兜底: {e}")
+                parsed = {"raw_response": str(e)}
 
             # 汇总规则检查结果
             summary = self._summarize_rules(parsed)
@@ -141,10 +136,19 @@ class RuleAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"[{self.name}] 规则校验失败: {e}", exc_info=True)
+            # 异常时無法确定违规情况，返回空结果，由编排层根据 has_severe_violation 判断
             return self._build_result(
                 status="failed",
-                result={"error": str(e)},
-                message=f"规则校验失败: {str(e)}",
+                result={
+                    "error": str(e),
+                    "rule_checks": {},
+                    "summary": {"passed": 0, "warnings": 0, "failed": 0, "total_risk": "unknown"},
+                    "total_rules": 0,
+                    "passed": 0,
+                    "warnings": 0,
+                    "failed": 0,
+                },
+                message=f"规则校验失败，无法确定合规状态: {str(e)}",
             )
 
     async def _load_rules(self) -> List[dict]:

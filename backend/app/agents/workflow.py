@@ -1,7 +1,16 @@
 """
 AI Agent 工作流
-使用 LangGraph 编排多 Agent 协作完成报销审核
-流程: 文档解析 -> 规则校验 -> (条件判断) -> 风险评估 -> 知识检索 -> 决策生成
+编排多 Agent 协作完成报销审核
+
+流程: 文档解析 → 规则校验 → (条件路由)
+  - 严重违规(≥2项)或前置异常: 跳过风险评估和知识检索，直达决策
+  - 正常: 风险评估 ∥ 知识检索 (LangGraph Send fan-out 并行) → 决策生成
+
+架构:
+  graph/state   — TypedDict AuditState + Annotated reducer
+  graph/nodes   — 5 个 StateGraph 节点工厂函数
+  graph/builder — StateGraph 构建器: 条件路由 + Send 并行 + AsyncSqliteSaver
+  AgentWorkflow — facade: 预加载数据 → graph.ainvoke() → 装配返回
 """
 import logging
 from typing import Optional, List, Dict, Any
@@ -13,11 +22,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.models.user import User
 from app.models.expense import Expense, ExpenseStatus
-from app.agents.document_agent import DocumentAgent
-from app.agents.rule_agent import RuleAgent
-from app.agents.risk_agent import RiskAgent
-from app.agents.rag_agent import RAGAgent
-from app.agents.decision_agent import DecisionAgent
+from app.agents.graph.builder import build_audit_graph
 from app.schemas.agent import AgentExecuteResponse, AgentResult
 
 logger = logging.getLogger(__name__)
@@ -25,14 +30,19 @@ logger = logging.getLogger(__name__)
 
 class AgentWorkflow:
     """
-    AI Agent 审核工作流
+    AI Agent 审核工作流（LangGraph StateGraph 版本）
 
-    编排多个专业 Agent 协作完成报销审核:
+    使用 LangGraph StateGraph 编排 5 个 Agent:
     1. 文档解析 - 提取发票信息
     2. 规则校验 - 检查合规性
-    3. 风险评估 - 多维度评分
-    4. 知识检索 - 相似案例参考
+    3. (条件路由) 风险评估 - 多维度评分    }
+    4. (条件路由) 知识检索 - 相似案例参考  } Send fan-out 并行
     5. 决策生成 - 最终审批建议
+
+    核心设计:
+    - 条件路由: rule 节点 failed_count>=2 → 跳过 risk+rag，直达 decision
+    - Send 并行: risk 和 rag 通过 Send fan-out 在独立 superstep 中并行执行
+    - AsyncSqliteSaver: 支持失败重试时从上一个节点续跑
     """
 
     def __init__(self, db: AsyncSession, user: User = None):
@@ -46,131 +56,117 @@ class AgentWorkflow:
         custom_context: Optional[dict] = None,
     ) -> dict:
         """
-        执行完整的 AI Agent 审核工作流
+        执行 LangGraph StateGraph 审核工作流
 
         Args:
             expense_id: 报销单ID
-            enabled_agents: 启用的Agent列表，None表示启用全部
+            enabled_agents: 启用的Agent列表，None 表示启用全部
             custom_context: 自定义上下文
 
         Returns:
-            工作流执行结果字典
+            工作流执行结果字典（与旧版结构完全兼容）
         """
-        logger.info(f"========== 开始 AI Agent 审核工作流 (报销单ID: {expense_id}) ==========")
-
-        # 加载报销单和用户信息
-        expense = await self._load_expense(expense_id)
-        if not expense:
-            return AgentExecuteResponse(
-                success=False,
-                workflow_status="failed",
-                expense_id=expense_id,
-                final_decision="error",
-                final_reason="报销单不存在",
-                agent_results=[],
-                message="报销单不存在",
-            ).model_dump()
-
-        user_info = await self._load_user_info(expense.user_id)
-
-        # 准备上下文
-        context = {
-            "expense": expense,
-            "user_info": user_info,
-            "document_texts": [],  # 后续可加载OCR文本
-        }
-        if custom_context:
-            context["custom"] = custom_context
-
-        agent_results: List[AgentResult] = []
-
-        # 判断哪些 Agent 需要执行
-        all_agents = enabled_agents is None
-        should_run = lambda name: all_agents or name in (enabled_agents or [])
-
-        # ===== 第1步: 文档解析 =====
-        if should_run("document"):
-            doc_agent = DocumentAgent()
-            doc_result = await doc_agent.execute(context)
-            agent_results.append(self._to_agent_result(doc_result))
-            context["document_result"] = doc_result.get("result", {})
-            logger.info(f"[Workflow] 步骤1 - 文档解析: {doc_result.get('status')}")
-        else:
-            context["document_result"] = {}
-
-        # ===== 第2步: 规则校验 =====
-        if should_run("rule"):
-            rule_agent = RuleAgent(self.db)
-            rule_result = await rule_agent.execute(context)
-            agent_results.append(self._to_agent_result(rule_result))
-            context["rule_result"] = rule_result.get("result", {})
-
-            # 条件判断：如果规则校验发现严重违规，可以跳过后面的步骤
-            rule_summary = rule_result.get("result", {}).get("summary", {})
-            failed_count = rule_summary.get("failed", 0)
-            logger.info(f"[Workflow] 步骤2 - 规则校验: {rule_result.get('status')}, 违规数: {failed_count}")
-        else:
-            context["rule_result"] = {}
-
-        # ===== 第3步: 风险评估 =====
-        if should_run("risk"):
-            # 加载历史记录
-            context["history"] = await self._load_user_history(expense.user_id)
-
-            risk_agent = RiskAgent()
-            risk_result = await risk_agent.execute(context)
-            agent_results.append(self._to_agent_result(risk_result))
-            context["risk_result"] = risk_result.get("result", {})
-            logger.info(f"[Workflow] 步骤3 - 风险评估: {risk_result.get('status')}")
-        else:
-            context["risk_result"] = {}
-
-        # ===== 第4步: 知识检索 =====
-        if should_run("rag"):
-            rag_agent = RAGAgent()
-            rag_result = await rag_agent.execute(context)
-            agent_results.append(self._to_agent_result(rag_result))
-            context["rag_result"] = rag_result.get("result", {})
-            logger.info(f"[Workflow] 步骤4 - 知识检索: {rag_result.get('status')}")
-        else:
-            context["rag_result"] = {}
-
-        # ===== 第5步: 决策生成 =====
-        if should_run("decision"):
-            decision_agent = DecisionAgent()
-            decision_result = await decision_agent.execute(context)
-            agent_results.append(self._to_agent_result(decision_result))
-            context["decision_result"] = decision_result.get("result", {})
-            logger.info(f"[Workflow] 步骤5 - 决策生成: {decision_result.get('status')}")
-        else:
-            context["decision_result"] = {}
-
-        # 提取最终决策
-        final_decision_result = context.get("decision_result", {})
-        final_decision_reason = final_decision_result.get(
-            "reason",
-            final_decision_result.get("message", "工作流已完成"),
+        logger.info(
+            f"========== AI Agent 审核 (LangGraph) expense={expense_id} =========="
         )
 
-        # 提取风险信息
-        risk_result = context.get("risk_result", {})
-        risk_level = risk_result.get("risk_level", "low")
-        risk_score = risk_result.get("risk_score", 0)
+        # —— 1. 加载数据 ——
+        expense = await self._load_expense(expense_id)
+        if not expense:
+            return self._error_response(expense_id, "报销单不存在")
 
-        logger.info(f"========== AI Agent 审核工作流完成 ==========")
-        logger.info(f"最终决策: {final_decision_result.get('decision', 'unknown')}")
+        user_info = await self._load_user_info(expense.user_id)
+        history = await self._load_user_history(expense.user_id)
+
+        # —— 2. 构建初始状态（与 AuditState TypedDict 对齐） ——
+        initial_state = {
+            "expense_id": expense_id,
+            "expense": expense,
+            "user_info": user_info,
+            "custom_context": custom_context,
+            "history": history,
+            "document_texts": [],
+            "document_result": {},
+            "rule_result": {},
+            "risk_result": {},
+            "rag_result": {},
+            "decision_result": {},
+            "agent_results": [],
+            "failed_count": 0,
+            "errors": [],
+            "enabled_agents": enabled_agents,
+        }
+
+        # —— 3. 构建 StateGraph 并执行 ——
+        try:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+            async with AsyncSqliteSaver.from_conn_string(
+                "data/audit_checkpoints.db"
+            ) as saver:
+                app = build_audit_graph(
+                    db=self.db,
+                    user=self.user,
+                    enabled_agents=enabled_agents,
+                    checkpointer=saver,
+                )
+                final_state = await app.ainvoke(
+                    initial_state,
+                    config={
+                        "configurable": {
+                            "thread_id": f"audit-{expense_id}"
+                        }
+                    },
+                )
+        except Exception as e:
+            logger.error(f"[Workflow] StateGraph 执行异常: {e}", exc_info=True)
+            return self._error_response(
+                expense_id, f"工作流引擎异常: {str(e)}"
+            )
+
+        # —— 4. 装配返回 ——
+        result = self._assemble_response(final_state)
+        logger.info(
+            f"========== AI Agent 审核完成: "
+            f"decision={result['final_decision']} =========="
+        )
+        return result
+
+    # ===== 辅助方法 =====
+
+    def _error_response(self, expense_id: int, message: str) -> dict:
+        """构造错误响应（兼容旧版返回结构）"""
+        return AgentExecuteResponse(
+            success=False,
+            workflow_status="failed",
+            expense_id=expense_id,
+            final_decision="error",
+            final_reason=message,
+            agent_results=[],
+            message=message,
+        ).model_dump()
+
+    def _assemble_response(self, state: dict) -> dict:
+        """从 StateGraph 结果 dict 装配与旧版完全一致的返回"""
+        dec = state.get("decision_result", {})
+        risk = state.get("risk_result", {})
 
         return {
             "success": True,
             "workflow_status": "completed",
-            "expense_id": expense_id,
-            "final_decision": final_decision_result.get("decision", "review"),
-            "final_reason": final_decision_reason,
-            "risk_level": risk_level,
-            "risk_score": risk_score,
-            "agent_results": [r.model_dump() if isinstance(r, AgentResult) else r for r in agent_results],
+            "expense_id": state.get("expense_id"),
+            "final_decision": dec.get("decision", "review"),
+            "final_reason": dec.get(
+                "reason",
+                dec.get("message", "工作流已完成"),
+            ),
+            "risk_level": risk.get("risk_level", "low"),
+            "risk_score": risk.get("risk_score", 0),
+            "agent_results": state.get("agent_results", []),
             "message": "Agent工作流执行完成",
         }
+
+    # ===== 数据加载方法（保持不变） =====
 
     async def _load_expense(self, expense_id: int) -> Optional[Expense]:
         """加载报销单"""
@@ -235,7 +231,7 @@ class AgentWorkflow:
             return []
 
     def _to_agent_result(self, result: dict) -> AgentResult:
-        """将字典转换为 AgentResult 对象"""
+        """将字典转换为 AgentResult 对象（保留兼容）"""
         return AgentResult(
             agent_name=result.get("agent_name", "unknown"),
             status=result.get("status", "unknown"),

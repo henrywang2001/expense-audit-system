@@ -32,7 +32,9 @@ DECISION_AGENT_PROMPT = """你是一个资深的财务审批决策顾问。你�
 - suggestions: 后续建议（如果通过需要关注什么，如果拒绝需要补充什么，如果需要复核需要重点核查什么）
 - risk_mitigation: 风险缓释措施
 
-请以JSON格式返回决策结果。"""
+请以JSON格式返回决策结果。
+
+请严格按照JSON格式返回结果，不要包含任何JSON之外的解释文字。"""
 
 
 class DecisionAgent(BaseAgent):
@@ -104,18 +106,11 @@ class DecisionAgent(BaseAgent):
 请给出最终审批决策建议。"""
 
             self.clear_memory()
-            response = await self.chat(prompt)
-
-            # 解析决策结果
             try:
-                json_start = response.find("{")
-                json_end = response.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    decision = json.loads(response[json_start:json_end])
-                else:
-                    decision = {"raw_response": response}
-            except json.JSONDecodeError:
-                decision = {"raw_response": response}
+                decision = await self.chat_json(prompt)
+            except ValueError as e:
+                logger.warning(f"[{self.name}] JSON 解析失败，使用兜底: {e}")
+                decision = {"raw_response": str(e)}
 
             # 如果LLM没有给出决策，基于规则计算
             if "decision" not in decision:
@@ -133,10 +128,12 @@ class DecisionAgent(BaseAgent):
                 status="failed",
                 result={
                     "decision": "review",
-                    "reason": f"决策分析异常: {str(e)}",
+                    "reason": f"决策分析异常，基于已收集信息建议人工复核: {str(e)}",
                     "confidence": 0,
+                    "key_findings": ["决策模块异常，需人工综合判断已收集的风险评估和规则校验结果"],
+                    "suggestions": ["建议人工复核所有前置分析结果后做出最终判断"],
                 },
-                message=f"决策分析失败: {str(e)}",
+                message=f"决策分析失败(已兜底为review): {str(e)}",
             )
 
     def _safe_serialize(self, obj) -> dict:
