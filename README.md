@@ -1,8 +1,11 @@
 # AI Agent 财务报销审核系统
 
-基于 AI Agent 技术的智能化财务报销审核系统，集成 LLM 大模型、RAG 知识检索、**LangGraph StateGraph 工作流编排**、LangChain 框架，实现报销单据的智能识别、规则校验、风险预警和自动化审批流程。
+基于 AI Agent 技术的智能化财务报销审核系统，集成 LLM 大模型、**json-logic 确定性规则引擎**、RAG 知识检索、**LangGraph StateGraph 工作流编排**、LangChain 框架，实现报销单据的智能识别、规则校验、风险预警和自动化审批流程。
 
-> **2026-08-04 更新**：完成并发安全 + 幂等去重 + 事务拆分改造，补齐状态机、乐观锁、缓存三大漏洞。详见 [并发/幂等/事务改造说明](#并发幂等事务安全改造)。
+> **2026-08-04 更新**：
+> - **json-logic 确定性规则引擎** — RuleAgent 从 LLM 裁判升级为零次 LLM 调用的确定性求值器，规则可后台 CRUD、结果 100% 可复现、脏数据 fail-loud。
+> - **并发安全 + 幂等去重 + 事务拆分改造** — 补齐状态机、乐观锁、缓存三大漏洞。
+> - 详见各自章节。
 
 ## 技术栈
 
@@ -13,6 +16,7 @@
 | LangChain | 0.3.30 | LLM应用开发框架 |
 | **LangGraph** | **0.4.10** | **Agent工作流编排 (StateGraph + Send并行)** |
 | LangChain-OpenAI | 0.2.14 | OpenAI兼容LLM集成 |
+| **maykin-json-logic-py** | **0.16.0** | **确定性规则引擎 (零次 LLM 调用)** |
 | DeepSeek V4 Flash | — | LLM大模型服务 |
 | 千问 text-embedding-v1 | — | 文本向量嵌入模型 |
 | ChromaDB | 1.5.9 | 向量数据库(RAG) |
@@ -26,13 +30,14 @@
 ## 核心功能
 
 1. **智能单据识别**：自动识别发票、收据等报销单据的关键信息
-2. **规则引擎校验**：基于企业财务制度自动校验报销合规性
-3. **RAG知识检索**：检索历史案例和财务制度，辅助审核决策
-4. **多Agent协作**：通过 LangGraph StateGraph 编排5个专业Agent协同工作
-5. **风险评估预警**：智能识别异常报销和潜在风险
-6. **审批流程自动化**：根据规则自动流转审批流程
-7. **数据统计分析**：报销数据的多维度统计和分析
-8. **🆕 并发安全保护**：乐观锁 + 状态机校验 + 幂等去重 + 事务拆分
+2. **🆕 确定性规则引擎**：基于 json-logic 的规则引擎，零次 LLM 调用，100% 可复现，脏数据 fail-loud
+3. **规则后台管理**：规则 CRUD API，运营可自助配置审核规则，无需改代码
+4. **RAG知识检索**：检索历史案例和财务制度，辅助审核决策
+5. **多Agent协作**：通过 LangGraph StateGraph 编排5个专业Agent协同工作
+6. **风险评估预警**：智能识别异常报销和潜在风险
+7. **审批流程自动化**：根据规则自动流转审批流程
+8. **数据统计分析**：报销数据的多维度统计和分析
+9. **🆕 并发安全保护**：乐观锁 + 状态机校验 + 幂等去重 + 事务拆分
 
 ## 项目结构
 
@@ -53,7 +58,9 @@ expense-audit-system/
 │   │   ├── core/              # 核心模块
 │   │   │   ├── security.py    # JWT安全
 │   │   │   ├── exceptions.py  # 自定义异常（含ConflictException）
-│   │   │   └── idempotency.py # ★ 幂等缓存（并发去重）
+│   │   │   ├── idempotency.py # ★ 幂等缓存（并发去重）
+│   │   │   ├── rule_engine.py # ★ 确定性规则引擎 (json-logic)
+│   │   │   └── rule_builder.py# ★ 规则编译器 ({field,op,val}→json-logic)
 │   │   ├── models/            # SQLAlchemy 数据模型
 │   │   │   ├── base.py        # 基类 + init_db + 列迁移
 │   │   │   ├── user.py        # 用户模型
@@ -63,6 +70,7 @@ expense-audit-system/
 │   │   ├── schemas/           # Pydantic 序列化模型
 │   │   │   ├── expense.py     # ★ AIReviewRequest（含idempotency_key）
 │   │   │   ├── agent.py       # ★ AgentExecuteRequest（含idempotency_key）
+│   │   │   ├── rule.py        # ★ RuleDef + CRUD schemas (json-logic)
 │   │   │   └── ...
 │   │   ├── services/          # 业务服务层
 │   │   │   ├── expense_service.py # ★ ai_review 重写（4 Phase并发安全）
@@ -71,7 +79,7 @@ expense-audit-system/
 │   │   ├── agents/            # AI Agent 模块
 │   │   │   ├── base_agent.py       # Agent 基类（结构化输出）
 │   │   │   ├── document_agent.py   # 文档解析 Agent
-│   │   │   ├── rule_agent.py       # 规则校验 Agent
+│   │   │   ├── rule_agent.py       # ★ 规则校验 Agent (确定性引擎+LLM语义)
 │   │   │   ├── risk_agent.py       # 风险评估 Agent (fail-closed)
 │   │   │   ├── rag_agent.py        # RAG 检索 Agent
 │   │   │   ├── decision_agent.py   # 决策生成 Agent (fail-review)
@@ -87,7 +95,8 @@ expense-audit-system/
 │   │   ├── conftest.py             # 共享 fixtures
 │   │   ├── test_workflow_routing.py # 条件路由测试 (13 tests)
 │   │   ├── test_graph.py           # 图编译/结构测试 (10 tests)
-│   │   └── test_api_regression.py  # ★ API回归测试 (13 tests)
+│   │   ├── test_api_regression.py  # ★ API回归测试 (13 tests)
+│   │   └── test_rule_engine.py     # ★ 规则引擎测试 (42 tests)
 │   └── requirements.txt       # 依赖清单
 ├── frontend/                  # 前端项目
 │   ├── src/
@@ -176,13 +185,46 @@ expense-audit-system/
 |-------|----------|--------|------|
 | **RiskAgent** | **fail-closed** | `critical / 100` | 评估失败不应低估风险 |
 | **DecisionAgent** | **fail-review** | `review / confidence=0` | 异常时保守，建议人工复核 |
-| **RuleAgent** | **fail-safe** | `failed=0, total_risk=unknown` | 无法确定合规状态，走全流程收集信息 |
-| DocumentAgent | fail-continue | `{}` | 文档解析失败不阻塞后续流程 |
-| RAGAgent | fail-continue | `[]` | 检索失败不阻塞后续流程 |
+| **RuleAgent** | **json-logic 引擎** | 确定性求值，fail-loud |
 
 ### 结构化输出
 
 所有 5 个 Agent 使用 `response_format={"type": "json_object"}` 强制 LLM 返回合法 JSON，替代旧版的正则 `response.find("{")...json.loads` 兜底模式，提升输出可靠性。
+
+## 规则引擎 (json-logic) 🆕
+
+### 架构
+
+```
+RuleAgent.execute(context)
+  │
+  ├─ 阶段1: 确定性引擎 (零次 LLM 调用)
+  │   ├── build_data(expense) → 纯数据字典 (预计算 invoice_age_days 等)
+  │   ├── RuleEngine(rules).evaluate(data) → jsonLogic(rule, data)
+  │   └── 返回: [{rule, status: pass|warn|fail|error, action, message}, …]
+  │
+  └─ 阶段2: LLM 语义补充 (可选, 仅 exec_mode=semantic 的规则)
+      └── _evaluate_semantic() → LLM 判断 (招待费备注是否合理等)
+```
+
+### 安全设计
+
+| 层级 | 手段 | 说明 |
+|------|------|------|
+| **数据安全** | `FIELD_WHITELIST` | `build_data` 只暴露白名单标量字段 |
+| **规则安全** | `validate_rule_ast` | 静态校验规则 AST，拦截白名单外字段/运算符 |
+| **运行安全** | json-logic 天然安全 | 不解释代码，无 `eval`/`exec` 风险 |
+| **脏数据** | fail-loud | 未知字段/None比较/脏枚举 → `status: error` |
+
+### 改造成效
+
+| 维度 | 改前 (LLM 当裁判) | 改后 (json-logic 引擎) |
+|------|:---:|:---:|
+| 规则校验 LLM 调用 | 每次 1 次 | **0 次** |
+| 结果可复现 | ❌ | ✅ 100% 确定性 |
+| 脏数据 | 被 LLM 吞掉/猜 | ✅ fail-loud 进人工复核 |
+| 可测性 | 不可单测 | ✅ **42 项 pytest** |
+| 规则管理 | 改代码 | ✅ **后台 CRUD 自配** (5 端点) |
 
 ## 并发/幂等/事务安全改造 🆕
 
@@ -314,12 +356,13 @@ pytest tests/ -v
 ```
 
 ```
-======================== 38 passed in 2.32s =========================
+======================== 80 passed in 2.32s =========================
 
-test_workflow_routing.py (13 tests)  — 条件路由 + enabled_agents
-test_graph.py          (10 tests)  — 图编译 + Send并行 + 节点工厂
-test_api_regression.py (13 tests)  — API回归 + fail-closed + 两入口统一
-test_conftest.py       (2 tests)   — fixtures
+test_rule_engine.py     (42 tests) — 规则引擎 + schema + builder + 边界
+test_workflow_routing.py (13 tests) — 条件路由 + enabled_agents
+test_graph.py          (10 tests) — 图编译 + Send并行 + 节点工厂
+test_api_regression.py (13 tests) — API回归 + fail-closed + 两入口统一
+test_conftest.py       (2 tests)  — fixtures
 ```
 
 ## 模型配置
