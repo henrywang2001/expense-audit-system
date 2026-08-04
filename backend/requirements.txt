@@ -72,6 +72,10 @@ urllib3==2.7.0
 packaging==23.2
 tenacity==8.5.0
 
+# 规则引擎
+maykin-json-logic-py>=0.16.0
+isodate>=0.7.0
+
 # AI/ML 依赖
 aiohttp==3.14.1
 aiohappyeyeballs==2.7.1

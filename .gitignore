@@ -1,3 +1,12 @@
+# ============================================================
+# 🔒 安全: 环境变量文件 (含 API Key, 绝不能提交!)
+# ============================================================
+.env
+.env.*
+*.env
+!*.env.example
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]
@@ -7,7 +16,6 @@ build/
 *.egg
 .venv/
 venv/
-.env
 *.db
 *.sqlite3
 
@@ -34,3 +42,7 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Worktree / temp
+.claude/
+workbuddy-tasks/

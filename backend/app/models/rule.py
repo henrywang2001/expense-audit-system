@@ -47,7 +47,7 @@ class Rule(BaseModel):
     condition = Column(
         Text,
         nullable=False,
-        comment="规则条件（JSON字符串）"
+        comment="规则条件（JSON字符串 / 人类可读描述）"
     )
     action = Column(
         String(200),
@@ -58,6 +58,18 @@ class Rule(BaseModel):
         JSON,
         nullable=True,
         comment="规则配置（JSON对象）"
+    )
+    structured_condition = Column(
+        JSON,
+        nullable=True,
+        comment="json-logic 结构化条件（机器可执行）"
+    )
+    exec_mode = Column(
+        String(20),
+        nullable=False,
+        default="semantic",
+        server_default="semantic",
+        comment="执行模式: deterministic / pre_computed / semantic"
     )
     is_active = Column(
         Boolean,

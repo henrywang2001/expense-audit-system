@@ -84,6 +84,7 @@ def init_db():
 
     # —— 迁移：为旧数据库补加缺失的列（幂等操作） ——
     _migrate_expense_columns(engine)
+    _migrate_rule_columns(engine)
 
     return engine
 
@@ -106,5 +107,28 @@ def _migrate_expense_columns(engine):
         if "ai_review_status" not in existing_cols:
             conn.execute(text(
                 "ALTER TABLE expenses ADD COLUMN ai_review_status VARCHAR(20)"
+            ))
+        conn.commit()
+
+
+def _migrate_rule_columns(engine):
+    """为 rules 表补加 json-logic 相关列（幂等：存在则跳过）"""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "rules" not in insp.get_table_names():
+        return
+
+    existing_cols = {c["name"] for c in insp.get_columns("rules")}
+
+    with engine.connect() as conn:
+        if "structured_condition" not in existing_cols:
+            conn.execute(text(
+                "ALTER TABLE rules ADD COLUMN structured_condition JSON"
+            ))
+        if "exec_mode" not in existing_cols:
+            conn.execute(text(
+                "ALTER TABLE rules ADD COLUMN exec_mode "
+                "VARCHAR(20) NOT NULL DEFAULT 'semantic'"
             ))
         conn.commit()

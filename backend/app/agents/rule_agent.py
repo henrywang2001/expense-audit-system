@@ -1,6 +1,10 @@
 """
 规则校验 Agent
 检查报销单是否符合数据库中的财务审核规则
+
+v2 (json-logic): 规则校验分两阶段
+  阶段1 — 确定性引擎 (RuleEngine, 零次 LLM): 硬规则 + 半硬规则
+  阶段2 — LLM 语义补充 (可选): 仅当存在 exec_mode=semantic 的规则时调用
 """
 import json
 import logging
@@ -10,8 +14,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base_agent import BaseAgent
-from app.models.rule import Rule
+from app.models.rule import Rule, RuleType
 from app.models.expense import ExpenseStatus
+from app.schemas.rule import RuleDef
+from app.core.rule_engine import (
+    RuleEngine, build_data, validate_rule_ast,
+    summarize_checks, RuleError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,216 +60,278 @@ class RuleAgent(BaseAgent):
 
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """
-        执行规则校验
+        执行规则校验（确定性引擎 + LLM 语义补充）
 
         Args:
             context: {
                 "expense": Expense对象或字典,
                 "document_result": 文档解析结果,
-                "user_info": 用户信息
+                "user_info": 用户信息,
+                "custom": 自定义规则列表 (修复静默丢弃)
             }
-
-        Returns:
-            规则校验结果
         """
         self._start_timer()
-        logger.info(f"[{self.name}] 开始规则校验...")
+        logger.info(f"[{self.name}] 开始规则校验 (json-logic 确定性引擎)...")
 
         try:
             expense = context.get("expense", {})
             document_result = context.get("document_result", {})
             user_info = context.get("user_info", {})
+            custom_rules_raw = context.get("custom", []) or []  # ★ 修复静默丢弃
 
-            # 从数据库加载活跃规则
-            active_rules = await self._load_rules()
+            # ── 阶段1: 数据准备 ──
+            data = build_data(expense, user_info)
 
-            # 构建校验输入
-            if isinstance(expense, dict):
-                expense_info = expense
-            else:
-                expense_info = {
-                    "id": expense.id,
-                    "title": expense.title,
-                    "expense_type": expense.expense_type.value if hasattr(expense.expense_type, 'value') else expense.expense_type,
-                    "total_amount": expense.total_amount,
-                    "currency": expense.currency,
-                    "description": expense.description,
-                    "items": [
-                        {
-                            "description": item.description,
-                            "amount": item.amount,
-                            "expense_date": str(item.expense_date) if item.expense_date else None,
-                            "invoice_no": item.invoice_no,
-                            "invoice_verified": item.invoice_verified,
-                        }
-                        for item in (expense.items if hasattr(expense, 'items') else expense.get("items", []))
-                    ],
-                }
+            # ── 阶段2: 加载规则 (DB + 默认 + custom) ──
+            all_rules = await self._load_rules(custom_rules_raw)
 
-            prompt = f"""当前报销单信息：
-{json.dumps(expense_info, ensure_ascii=False, indent=2)}
+            # 分流: 确定规则走引擎, 语义规则留给 LLM
+            hard_rules = [r for r in all_rules if r.exec_mode != "semantic"]
+            semantic_rules = [r for r in all_rules if r.exec_mode == "semantic"]
 
-适用规则列表：
-{json.dumps(active_rules, ensure_ascii=False, indent=2)}
+            # ── 阶段3: 确定性引擎求值 (零次 LLM) ──
+            engine = RuleEngine(hard_rules)
+            checks = engine.evaluate(data)
 
-{self._build_user_context(user_info)}
+            # ── 阶段4: LLM 语义补充 (仅当有语义规则时才调 LLM) ──
+            if semantic_rules:
+                semantic_checks = await self._evaluate_semantic(
+                    data, semantic_rules, expense, document_result, user_info
+                )
+                checks += semantic_checks
 
-文档解析结果（如有）：
-{json.dumps(document_result, ensure_ascii=False, indent=2) if document_result else "无"}
-
-请逐条检查报销单是否符合上述规则，并给出详细的检查报告。以JSON格式返回。"""
-
-            # 调用LLM进行规则校验
-            self.clear_memory()
-            try:
-                parsed = await self.chat_json(prompt)
-            except ValueError as e:
-                logger.warning(f"[{self.name}] JSON 解析失败，使用兜底: {e}")
-                parsed = {"raw_response": str(e)}
-
-            # 汇总规则检查结果
-            summary = self._summarize_rules(parsed)
+            # ── 汇总 ──
+            summary = summarize_checks(checks)
 
             return self._build_result(
                 status="success",
                 result={
-                    "rule_checks": parsed,
+                    "rule_checks": checks,
                     "summary": summary,
-                    "total_rules": len(active_rules),
+                    "total_rules": len(all_rules),
+                    "engine_rules": len(hard_rules),
+                    "semantic_rules": len(semantic_rules),
                     "passed": summary.get("passed", 0),
                     "warnings": summary.get("warnings", 0),
                     "failed": summary.get("failed", 0),
                 },
-                message=f"规则校验完成: {summary.get('passed', 0)}通过, {summary.get('warnings', 0)}警告, {summary.get('failed', 0)}违规",
+                message=(
+                    f"规则校验完成: {summary.get('passed', 0)}通过, "
+                    f"{summary.get('warnings', 0)}警告, "
+                    f"{summary.get('failed', 0)}违规"
+                    + (f", {summary.get('errors', 0)}异常"
+                       if summary.get("errors", 0) else "")
+                ),
             )
 
         except Exception as e:
             logger.error(f"[{self.name}] 规则校验失败: {e}", exc_info=True)
-            # 异常时無法确定违规情况，返回空结果，由编排层根据 has_severe_violation 判断
             return self._build_result(
                 status="failed",
                 result={
                     "error": str(e),
-                    "rule_checks": {},
-                    "summary": {"passed": 0, "warnings": 0, "failed": 0, "total_risk": "unknown"},
+                    "rule_checks": [],
+                    "summary": {"passed": 0, "warnings": 0,
+                                "failed": 0, "errors": 1, "total_risk": "high"},
                     "total_rules": 0,
-                    "passed": 0,
-                    "warnings": 0,
-                    "failed": 0,
+                    "passed": 0, "warnings": 0, "failed": 0,
                 },
                 message=f"规则校验失败，无法确定合规状态: {str(e)}",
             )
 
-    async def _load_rules(self) -> List[dict]:
-        """从数据库加载活跃规则"""
-        if not self.db:
-            return self._get_default_rules()
+    async def _load_rules(
+        self, custom_rules_raw: list | None = None
+    ) -> List[RuleDef]:
+        """加载活跃规则: DB 优先 → 默认规则兜底 → 合并自定义规则
 
-        try:
-            result = await self.db.execute(
-                select(Rule).where(Rule.is_active == True)
-            )
-            rules = result.scalars().all()
-            return [
-                {
-                    "id": r.id,
-                    "name": r.name,
-                    "rule_type": r.rule_type.value if hasattr(r.rule_type, 'value') else r.rule_type,
-                    "condition": r.condition,
-                    "action": r.action,
-                    "config": r.config,
-                }
-                for r in rules
+        优先使用 DB 中 structured_condition 不为空的规则（确定性引擎可执行）;
+        若 DB 中 structured_condition 为空, 退化到默认规则。
+        """
+        rules: List[RuleDef] = []
+
+        # ① 从数据库加载
+        if self.db:
+            try:
+                result = await self.db.execute(
+                    select(Rule).where(Rule.is_active == True)
+                )
+                db_rules = result.scalars().all()
+
+                for r in db_rules:
+                    sc = r.structured_condition  # json-logic 对象
+                    if sc and isinstance(sc, dict) and sc != {}:
+                        # 有可执行的 json-logic
+                        rules.append(RuleDef(
+                            name=r.name,
+                            rule_type=(
+                                r.rule_type.value
+                                if hasattr(r.rule_type, "value")
+                                else str(r.rule_type)
+                            ),
+                            logic=sc,
+                            action=r.action,
+                            message=f"{r.name}不符合规则",
+                            description=r.condition,  # 原文作人类可读描述
+                            exec_mode=getattr(r, "exec_mode", "deterministic") or "deterministic",
+                        ))
+                    else:
+                        # structured_condition 空 → 该行仍走 LLM
+                        rules.append(RuleDef(
+                            name=r.name,
+                            rule_type=(
+                                r.rule_type.value
+                                if hasattr(r.rule_type, "value")
+                                else str(r.rule_type)
+                            ),
+                            logic={},
+                            action=r.action,
+                            message=f"{r.name}不符合规则",
+                            description=r.condition,
+                            exec_mode="semantic",
+                        ))
+
+                if rules:
+                    logger.info(f"从 DB 加载 {len(rules)} 条规则")
+            except Exception as e:
+                logger.warning(f"加载 DB 规则失败: {e}")
+
+        # ② DB 无规则或无结构化规则 → 用默认规则
+        deterministic_count = sum(1 for r in rules if r.exec_mode != "semantic")
+        if deterministic_count == 0:
+            logger.info("DB 无确定性规则, 使用默认 5 条 json-logic 规则")
+            rules = self._get_default_rules() + [
+                r for r in rules if r.exec_mode == "semantic"
             ]
-        except Exception as e:
-            logger.warning(f"加载规则失败，使用默认规则: {e}")
-            return self._get_default_rules()
 
-    def _get_default_rules(self) -> List[dict]:
-        """获取默认审核规则"""
+        # ③ 合并自定义规则 ★ 修复静默丢弃
+        for cr in (custom_rules_raw or []):
+            if isinstance(cr, dict) and cr.get("logic"):
+                try:
+                    logic = cr["logic"]
+                    # 安全检查: 只允许白名单字段和运算符
+                    if cr.get("_skip_validation"):
+                        pass  # 内部注入的规则可跳过
+                    else:
+                        validate_rule_ast(logic)
+                    rules.append(RuleDef(
+                        name=cr.get("name", "自定义规则"),
+                        rule_type=cr.get("rule_type", "custom"),
+                        logic=logic,
+                        action=cr.get("action", "warn"),
+                        message=cr.get("message", "自定义规则触发"),
+                        description=cr.get("description"),
+                        exec_mode=cr.get("exec_mode", "deterministic"),
+                    ))
+                except RuleError as e:
+                    logger.warning(f"自定义规则校验不通过, 跳过: {cr.get('name')}: {e}")
+                except Exception as e:
+                    logger.warning(f"自定义规则解析失败, 跳过: {e}")
+
+        return rules
+
+    def _get_default_rules(self) -> List[RuleDef]:
+        """获取默认审核规则 (json-logic 形式, 兼容 maykin-json-logic-py)"""
         return [
-            {
-                "id": 1,
-                "name": "单笔金额上限",
-                "rule_type": "amount_limit",
-                "condition": "单笔报销金额不超过5000元",
-                "action": "require_approval",
-                "config": {"max_amount": 5000, "currency": "CNY"},
-            },
-            {
-                "id": 2,
-                "name": "必须有发票",
-                "rule_type": "compliance",
-                "condition": "所有报销项目必须提供有效发票",
-                "action": "reject",
-                "config": {"require_invoice": True},
-            },
-            {
-                "id": 3,
-                "name": "差旅费标准",
-                "rule_type": "amount_limit",
-                "condition": "差旅住宿费不超过500元/天，交通费不超过300元/天",
-                "action": "warn",
-                "config": {"hotel_max": 500, "transport_max": 300},
-            },
-            {
-                "id": 4,
-                "name": "招待费限制",
-                "rule_type": "amount_limit",
-                "condition": "单次招待费不超过2000元，需注明招待对象和事由",
-                "action": "require_approval",
-                "config": {"max_amount": 2000},
-            },
-            {
-                "id": 5,
-                "name": "发票时间",
-                "rule_type": "time",
-                "condition": "发票日期必须在3个月以内",
-                "action": "warn",
-                "config": {"max_age_days": 90},
-            },
+            RuleDef(
+                name="单笔金额上限", rule_type="amount_limit",
+                logic={"<=": [{"var": "total_amount"}, 5000]},
+                action="require_approval",
+                message="单笔报销金额超过 5000 元，需上级审批",
+                description="单笔报销金额不超过5000元",
+            ),
+            RuleDef(
+                name="必须有发票", rule_type="compliance",
+                logic={"!": [{"var": "has_unverified_invoice"}]},
+                action="reject",
+                message="存在未验证发票的明细项",
+                description="所有报销项目必须提供有效发票",
+            ),
+            RuleDef(
+                name="差旅费标准", rule_type="amount_limit",
+                logic={
+                    "_kind": "every", "_array": "items",
+                    "_item_rule": {"<=": [{"var": "amount"}, 500]},
+                },
+                action="warn",
+                message="差旅住宿费/交通费超出标准",
+                description="差旅住宿费不超过500元/天，交通费不超过300元/天",
+            ),
+            RuleDef(
+                name="招待费限制", rule_type="amount_limit",
+                logic={"<=": [{"var": "total_amount"}, 2000]},
+                action="require_approval",
+                message="单次招待费超过2000元，需注明对象与事由",
+                description="单次招待费不超过2000元",
+            ),
+            RuleDef(
+                name="发票时间", rule_type="time",
+                logic={"<=": [{"var": "max_invoice_age_days"}, 90]},
+                action="warn",
+                message="存在超过3个月的发票",
+                description="发票日期必须在3个月以内",
+            ),
         ]
 
-    def _build_user_context(self, user_info: dict) -> str:
-        """构建用户上下文描述"""
-        if not user_info:
-            return ""
+    async def _evaluate_semantic(
+        self, data: dict, semantic_rules: List[RuleDef],
+        expense, document_result: dict, user_info: dict,
+    ) -> List[dict]:
+        """LLM 语义规则补充判断 — 仅当存在 exec_mode=semantic 的规则时才调用"""
+        if not semantic_rules:
+            return []
 
-        parts = []
-        if isinstance(user_info, dict):
-            if user_info.get("department"):
-                parts.append(f"所属部门: {user_info['department']}")
-            if user_info.get("position"):
-                parts.append(f"职位: {user_info['position']}")
-            if user_info.get("role"):
-                role = user_info['role']
-                if hasattr(role, 'value'):
-                    role = role.value
-                parts.append(f"角色: {role}")
+        expense_info = data  # build_data 已转为纯 dict
 
-        if parts:
-            return "\n用户信息：\n" + "\n".join(parts)
-        return ""
+        prompt = f"""你是一个专业的财务规则审核助手。以下报销单已经通过了确定性规则引擎的检查,
+但仍有一些需要语义判断的规则需要你审核。
 
-    def _summarize_rules(self, parsed: dict) -> dict:
-        """汇总规则检查结果"""
-        summary = {"passed": 0, "warnings": 0, "failed": 0, "total_risk": "low"}
+当前报销单信息：
+{json.dumps(expense_info, ensure_ascii=False, indent=2, default=str)}
 
-        checks = parsed.get("checks", parsed.get("rule_checks", []))
-        if isinstance(checks, list):
-            for check in checks:
-                result = check.get("result", check.get("status", "")).lower()
-                if result == "pass":
-                    summary["passed"] += 1
-                elif result == "warn":
-                    summary["warnings"] += 1
-                elif result == "fail":
-                    summary["failed"] += 1
+需要语义判断的规则：
+{json.dumps([{"name": r.name, "description": r.description, "action": r.action}
+             for r in semantic_rules], ensure_ascii=False, indent=2)}
 
-        # 综合风险等级
-        if summary["failed"] > 2:
-            summary["total_risk"] = "high"
-        elif summary["failed"] > 0 or summary["warnings"] > 2:
-            summary["total_risk"] = "medium"
+{self._build_user_context(user_info)}
 
-        return summary
+请逐条判断, 返回 JSON 格式:
+{{"checks": [{{"rule": "规则名", "result": "pass"|"warn"|"fail", "reason": "判断依据"}}]}}"""
+
+        self.clear_memory()
+        try:
+            parsed = await self.chat_json(prompt)
+        except ValueError as e:
+            logger.warning(f"[{self.name}] 语义规则 LLM 解析失败: {e}")
+            # 兜底: 全部标记为 warn
+            return [
+                {"rule": r.name, "status": "warn",
+                 "action": r.action,
+                 "message": f"{r.message} [LLM异常, 默认warn]"}
+                for r in semantic_rules
+            ]
+
+        checks_raw = parsed.get("checks", [])
+        result = []
+        for sr in semantic_rules:
+            matched = next(
+                (c for c in checks_raw if c.get("rule") == sr.name), None
+            )
+            if matched:
+                raw_result = (matched.get("result") or "").lower()
+                status = (
+                    "pass" if raw_result == "pass"
+                    else "fail" if raw_result == "fail"
+                    else "warn"
+                )
+                result.append({
+                    "rule": sr.name, "status": status,
+                    "action": sr.action,
+                    "message": f"{sr.message} [LLM: {matched.get('reason', '无')}]",
+                })
+            else:
+                result.append({
+                    "rule": sr.name, "status": "warn",
+                    "action": sr.action,
+                    "message": f"{sr.message} [LLM未返回此规则结果]",
+                })
+        return result
