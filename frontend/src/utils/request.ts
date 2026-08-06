@@ -31,6 +31,7 @@ instance.interceptors.request.use(
 instance.interceptors.response.use(
   (response: AxiosResponse) => {
     const { data } = response
+    // 后端返回 {success, data, message} 格式, 登录成功也走这里
     if (data.code && data.code !== 200 && data.code !== 0) {
       ElMessage.error(data.message || '请求失败')
       return Promise.reject(new Error(data.message || '请求失败'))

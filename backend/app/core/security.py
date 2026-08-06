@@ -6,25 +6,33 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
 from jose import jwt, JWTError
-from passlib.context import CryptContext
 
 from app.config import settings
 
-# 密码哈希上下文 (bcrypt)
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# ===== 密码哈希 (绕过 passlib 的 bcrypt 5.x 不兼容) =====
+# bcrypt 5.x 移除了 __about__，passlib 1.7.4 做检测时崩溃
+# 直接使用 bcrypt 原生 API，避免 passlib。pip pin bcrypt==4.1.3
 
 
 def hash_password(password: str) -> str:
-    """对明文密码进行哈希处理 (bcrypt限制72字节)"""
-    password_bytes = password.encode("utf-8")
-    if len(password_bytes) > 72:
-        password_bytes = password_bytes[:72]
-    return pwd_context.hash(password_bytes.decode("utf-8", errors="replace"))
+    """对明文密码进行 bcrypt 哈希"""
+    import bcrypt
+    pwd = password.encode("utf-8")
+    if len(pwd) > 72:
+        pwd = pwd[:72]
+    return bcrypt.hashpw(pwd, bcrypt.gensalt(12)).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """验证明文密码与哈希密码是否匹配"""
-    return pwd_context.verify(plain_password, hashed_password)
+    """验证密码与哈希是否匹配"""
+    import bcrypt
+    pwd = plain_password.encode("utf-8")
+    if len(pwd) > 72:
+        pwd = pwd[:72]
+    try:
+        return bcrypt.checkpw(pwd, hashed_password.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False
 
 
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
