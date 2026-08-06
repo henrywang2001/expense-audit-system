@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, reactive } from 'vue'
-import type { Expense, ExpenseListParams, Statistics } from '@/types'
+import type { Expense, ExpenseListParams, StatisticsOverview } from '@/types'
 import { getExpenseList, getExpenseDetail, getStatistics as getStatsApi } from '@/api/expense'
 
 export const useExpenseStore = defineStore('expense', () => {
@@ -8,7 +8,8 @@ export const useExpenseStore = defineStore('expense', () => {
   const total = ref(0)
   const loading = ref(false)
   const currentExpense = ref<Expense | null>(null)
-  const statistics = ref<Statistics | null>(null)
+  // 存的是接口原始 payload（StatisticsOverview），不是页面视图模型
+  const statistics = ref<StatisticsOverview | null>(null)
   const statsLoading = ref(false)
 
   const listParams = reactive<ExpenseListParams>({
@@ -49,10 +50,11 @@ export const useExpenseStore = defineStore('expense', () => {
     }
   }
 
-  async function fetchStatistics(params?: { start_date?: string; end_date?: string }) {
+  // ⚠️ 后端 get_statistics 不接受任何 Query 参数，故不再暴露 params 形参
+  async function fetchStatistics() {
     statsLoading.value = true
     try {
-      const res = await getStatsApi(params)
+      const res = await getStatsApi()
       statistics.value = res.data
     } catch (error) {
       console.error('Failed to fetch statistics:', error)
@@ -67,8 +69,6 @@ export const useExpenseStore = defineStore('expense', () => {
     listParams.status = undefined
     listParams.expense_type = undefined
     listParams.keyword = undefined
-    listParams.start_date = undefined
-    listParams.end_date = undefined
   }
 
   return {

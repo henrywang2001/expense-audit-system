@@ -53,15 +53,30 @@ instance.interceptors.response.use(
         case 404:
           ElMessage.error('请求的资源不存在')
           break
-        case 422:
+        case 422: {
+          // 本项目自定义异常处理器返回 {success:false, message, detail:{errors:[{field,message}]}}
+          // 同时兼容 FastAPI 原生的 detail 数组形态与纯字符串形态。
           const detail = data?.detail
-          if (Array.isArray(detail)) {
-            const messages = detail.map((e: any) => e.msg).join('；')
-            ElMessage.error(messages)
+          const errors = detail?.errors
+          if (Array.isArray(errors) && errors.length > 0) {
+            const messages = errors
+              .map((e: any) => (e?.field ? `${e.field}: ${e.message}` : e?.message))
+              .filter(Boolean)
+              .join('；')
+            ElMessage.error(messages || data?.message || '请求参数错误')
+          } else if (Array.isArray(detail) && detail.length > 0) {
+            const messages = detail
+              .map((e: any) => e?.msg || e?.message)
+              .filter(Boolean)
+              .join('；')
+            ElMessage.error(messages || data?.message || '请求参数错误')
+          } else if (typeof detail === 'string' && detail) {
+            ElMessage.error(detail)
           } else {
-            ElMessage.error(detail || '请求参数错误')
+            ElMessage.error(data?.message || '请求参数错误')
           }
           break
+        }
         case 500:
           ElMessage.error('服务器内部错误')
           break
@@ -77,30 +92,32 @@ instance.interceptors.response.use(
   }
 )
 
+// ⚠️ 注意：响应拦截器已 `return data`，所以实例方法返回的是 `AxiosResponse`，
+// 业务层拿到的 `T` 实际是 `data` 的载荷类型。为消除 `AxiosResponse` 与 `Promise<T>` 的
+// 类型错位（否则每个调用点都会报类型错误），这里统一做一次 `as unknown as Promise<T>` 断言。
+// 切勿改动拦截器的 `return data`（那是三态信封剥层的核心约定）。
 export function get<T = any>(url: string, params?: any, config?: AxiosRequestConfig): Promise<T> {
-  return instance.get(url, { params, ...config })
+  return instance.get(url, { params, ...config }) as unknown as Promise<T>
 }
 
 export function post<T = any>(url: string, data?: any, config?: AxiosRequestConfig): Promise<T> {
-  return instance.post(url, data, config)
+  return instance.post(url, data, config) as unknown as Promise<T>
 }
 
 export function put<T = any>(url: string, data?: any, config?: AxiosRequestConfig): Promise<T> {
-  return instance.put(url, data, config)
+  return instance.put(url, data, config) as unknown as Promise<T>
 }
 
 export function del<T = any>(url: string, config?: AxiosRequestConfig): Promise<T> {
-  return instance.delete(url, config)
+  return instance.delete(url, config) as unknown as Promise<T>
 }
 
 export function upload<T = any>(url: string, file: File, fieldName: string = 'file'): Promise<T> {
   const formData = new FormData()
   formData.append(fieldName, file)
-  return instance.post(url, formData, {
-    headers: {
-      'Content-Type': 'multipart/form-data'
-    }
-  })
+  // 不要手写 Content-Type：手写会丢失 multipart 的 boundary，
+  // 交给 axios 依据 FormData 自动生成。
+  return instance.post(url, formData) as unknown as Promise<T>
 }
 
 export default instance

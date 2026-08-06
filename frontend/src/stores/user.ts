@@ -37,18 +37,35 @@ export const useUserStore = defineStore('user', () => {
 
   async function login(form: LoginForm) {
     const res = await loginApi(form)
-    const tokenData = (res as any).data || res
+    const tokenData = res.data
     token.value = tokenData.access_token
     setToken(tokenData.access_token)
-    await fetchUserInfo()
+    // 登录响应的 data 中已内联 user，直接赋值可省一次 /auth/me 请求
+    if (tokenData.user) {
+      user.value = tokenData.user
+    } else {
+      await fetchUserInfo()
+    }
   }
 
+  /**
+   * 拉取当前用户信息。
+   * ⚠️ GET /auth/me 是【裸响应】（顶层就是 User 对象，无 success/data 信封），
+   *    所以这里必须 `user.value = res`，写成 `res.data` 会恒为 undefined。
+   */
   async function fetchUserInfo() {
     try {
       const res = await getUserInfoApi()
-      user.value = res.data
+      user.value = res
     } catch (error) {
       console.error('Failed to fetch user info:', error)
+    }
+  }
+
+  /** 供路由守卫调用：有 token 但 user 尚未加载时补拉一次 */
+  async function ensureUserLoaded() {
+    if (token.value && !user.value) {
+      await fetchUserInfo()
     }
   }
 
@@ -76,6 +93,7 @@ export const useUserStore = defineStore('user', () => {
     hasPermission,
     login,
     fetchUserInfo,
+    ensureUserLoaded,
     logout
   }
 })

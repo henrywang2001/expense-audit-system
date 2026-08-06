@@ -1,19 +1,23 @@
 import { get, post } from '@/utils/request'
-import type { Expense, ApprovalRecord, ApiResponse, PaginatedResponse } from '@/types'
-import type { ExpenseListParams, ExpenseListResponse } from '@/types/expense'
+import type { ApprovalRecord, ApiResponse, ApiListResponse, ExpenseListParams } from '@/types'
 
-export function getApprovalList(params?: ExpenseListParams): Promise<ApiResponse<ExpenseListResponse>> {
-  return get<ApiResponse<ExpenseListResponse>>('/approvals', params)
+// ⚠️ 后端 approval.py:21 定义为 @router.get("/")，路径必须【带】尾斜杠。
+// ⚠️ 列表元素是【审批记录 ApprovalResponse】，不是报销单 Expense。
+export function getApprovalList(params?: ExpenseListParams): Promise<ApiListResponse<ApprovalRecord>> {
+  return get<ApiListResponse<ApprovalRecord>>('/approvals/', params)
 }
 
-export function approveExpense(id: number, comment?: string): Promise<ApiResponse<Expense>> {
-  return post<ApiResponse<Expense>>(`/approvals/${id}/approve`, { comment })
+/** @param approvalId 传的是审批记录 id，不是报销单 id */
+export function approveExpense(approvalId: number, comment?: string): Promise<ApiResponse<ApprovalRecord>> {
+  return post<ApiResponse<ApprovalRecord>>(`/approvals/${approvalId}/approve`, { comment })
 }
 
-export function rejectExpense(id: number, comment: string): Promise<ApiResponse<Expense>> {
-  return post<ApiResponse<Expense>>(`/approvals/${id}/reject`, { comment })
+/** @param approvalId 传的是审批记录 id，不是报销单 id */
+export function rejectExpense(approvalId: number, comment: string): Promise<ApiResponse<ApprovalRecord>> {
+  return post<ApiResponse<ApprovalRecord>>(`/approvals/${approvalId}/reject`, { comment })
 }
 
-export function getApprovalHistory(id: number): Promise<ApiResponse<ApprovalRecord[]>> {
-  return get<ApiResponse<ApprovalRecord[]>>(`/approvals/${id}/history`)
+/** @param expenseId 这里传的是【报销单 id】，与 approve/reject 不同 */
+export function getApprovalHistoryByExpense(expenseId: number): Promise<ApiResponse<ApprovalRecord[]>> {
+  return get<ApiResponse<ApprovalRecord[]>>(`/approvals/${expenseId}/history`)
 }
