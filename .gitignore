@@ -46,3 +46,6 @@ Thumbs.db
 # Worktree / temp
 .claude/
 workbuddy-tasks/
+
+# Temp debug files (API responses, curl outputs, scratch data)
+*.tmp
