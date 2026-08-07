@@ -2,6 +2,8 @@
 报销单及相关模型
 """
 import enum
+from typing import Optional
+
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, DateTime,
     ForeignKey, Text, JSON, Enum, func
@@ -198,6 +200,27 @@ class Expense(BaseModel):
         back_populates="expense",
         cascade="all, delete-orphan"
     )
+
+    # ===== 提交人冗余只读属性 =====
+    # 说明：`user` 关系声明为 lazy="joined"，任何 Expense 查询都会随主查询
+    # LEFT JOIN 出 users 行，因此这里读取不会触发异步懒加载。
+    # 仍做防御性判空，保证关联缺失时返回 None 而非抛异常。
+
+    @property
+    def submitter_name(self) -> Optional[str]:
+        """提交人姓名（优先 full_name，回退 username）"""
+        user = self.__dict__.get("user")
+        if user is None:
+            return None
+        return getattr(user, "full_name", None) or getattr(user, "username", None)
+
+    @property
+    def submitter_department(self) -> Optional[str]:
+        """提交人所属部门"""
+        user = self.__dict__.get("user")
+        if user is None:
+            return None
+        return getattr(user, "department", None)
 
     def __repr__(self):
         return f"<Expense(id={self.id}, no='{self.expense_no}', status='{self.status}')>"

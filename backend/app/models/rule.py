@@ -54,6 +54,13 @@ class Rule(BaseModel):
         nullable=False,
         comment="规则动作（如：reject / warn / require_approval）"
     )
+    message = Column(
+        String(500),
+        nullable=True,
+        default="",
+        server_default="",
+        comment="规则命中后的提示文案（为空时回退为 '{name}不符合规则'）"
+    )
     config = Column(
         JSON,
         nullable=True,

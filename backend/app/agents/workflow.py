@@ -81,7 +81,13 @@ class AgentWorkflow:
         # —— 2. 构建初始状态（与 AuditState TypedDict 对齐） ——
         initial_state = {
             "expense_id": expense_id,
-            "expense": expense,
+            # 关键修复(B1): 将 Expense ORM 转为纯 dict。
+            # AsyncSqliteSaver 在每次写入 checkpoint 时会 msgpack 序列化整张
+            # AuditState，而 Expense ORM 对象（含 SQLAlchemy 内部状态/关系）不可
+            # 序列化，会抛出 "Type is not msgpack serializable: Expense" 并导致
+            # 工作流内部失败。转为纯 dict 后 state 可序列化，且 RuleAgent.build_data
+            # 与所有 Agent 的 isinstance(expense, dict) 分支均兼容该形态。
+            "expense": self._expense_to_state_dict(expense),
             "user_info": user_info,
             "custom_context": custom_context,
             "history": history,
@@ -167,6 +173,54 @@ class AgentWorkflow:
         }
 
     # ===== 数据加载方法（保持不变） =====
+
+    @staticmethod
+    def _expense_to_state_dict(expense: Expense) -> dict:
+        """
+        把 Expense ORM 收敛为可被 checkpointer(msgpack) 序列化的纯字典。
+
+        AsyncSqliteSaver 在每次写 checkpoint 时会序列化整张 AuditState，
+        而 Expense ORM 对象（含 SQLAlchemy 内部状态、关系代理、未提交的
+        session 引用）无法 msgpack 序列化，会抛出
+        ``Type is not msgpack serializable: Expense``，使工作流内部失败。
+
+        这里只保留各 Agent / build_data 实际需要的字段，并统一把 Enum 收敛成
+        其 ``value`` 字符串、金额转 float、items 转 list[dict]，确保整张
+        state 可被 msgpack 安全序列化。
+
+        兼容性：RuleAgent.build_data 及 DocumentAgent/RiskAgent/RAGAgent/
+        DecisionAgent 均已支持 ``isinstance(expense, dict)`` 分支，使用 dict
+        形态与 ORM 形态行为完全一致。
+        """
+        def _enum_val(v: Any) -> Any:
+            return v.value if hasattr(v, "value") else v
+
+        items: List[dict] = []
+        for it in getattr(expense, "items", None) or []:
+            items.append({
+                "amount": float(getattr(it, "amount", 0) or 0),
+                "invoice_verified": bool(getattr(it, "invoice_verified", False)),
+                "expense_date": (
+                    str(getattr(it, "expense_date", None))
+                    if getattr(it, "expense_date", None) is not None
+                    else None
+                ),
+                "description": getattr(it, "description", None) or "",
+                "invoice_no": getattr(it, "invoice_no", None) or "",
+            })
+
+        return {
+            "id": expense.id,
+            "user_id": getattr(expense, "user_id", None),
+            "expense_no": getattr(expense, "expense_no", None),
+            "title": getattr(expense, "title", None) or "",
+            "expense_type": _enum_val(getattr(expense, "expense_type", "")),
+            "total_amount": float(getattr(expense, "total_amount", 0) or 0),
+            "currency": getattr(expense, "currency", None) or "",
+            "status": _enum_val(getattr(expense, "status", "")),
+            "description": getattr(expense, "description", None) or "",
+            "items": items,
+        }
 
     async def _load_expense(self, expense_id: int) -> Optional[Expense]:
         """加载报销单"""

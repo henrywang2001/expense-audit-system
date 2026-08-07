@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { getToken } from '@/utils/helpers'
+import { useUserStore } from '@/stores/user'
+import { ElMessage } from 'element-plus'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -54,7 +56,7 @@ const routes: RouteRecordRaw[] = [
         path: 'reports',
         name: 'Reports',
         component: () => import('@/views/Reports.vue'),
-        meta: { title: '统计报表' }
+        meta: { title: '统计报表', roles: ['admin', 'finance'] }
       }
     ]
   },
@@ -72,11 +74,12 @@ const router = createRouter({
 })
 
 // Route guard
-router.beforeEach((to, _from, next) => {
+router.beforeEach(async (to, _from, next) => {
   // Set page title
   document.title = (to.meta.title as string) || '财务报销审核系统'
 
   const token = getToken()
+  const userStore = useUserStore()
 
   if (to.meta.noAuth) {
     // Login page - redirect to dashboard if already logged in
@@ -93,15 +96,21 @@ router.beforeEach((to, _from, next) => {
     return
   }
 
-  // Check role permissions
+  // 刷新场景下：有 token 但 store 里的 user 尚未加载，补拉一次用户信息
+  await userStore.ensureUserLoaded()
+
+  // 校验角色权限（命中 meta.roles 才放行，避免无限重定向）
   const requiredRoles = to.meta.roles as string[] | undefined
   if (requiredRoles && requiredRoles.length > 0) {
-    // We'll check roles dynamically from the store
-    // For now, allow through - detailed check done at component level
-    next()
-  } else {
-    next()
+    const userRole = userStore.user?.role
+    if (!userRole || !requiredRoles.includes(userRole)) {
+      ElMessage.warning('您没有访问该页面的权限')
+      next('/dashboard')
+      return
+    }
   }
+
+  next()
 })
 
 export default router

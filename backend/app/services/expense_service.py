@@ -24,6 +24,7 @@ from app.models.expense import (
 )
 from app.models.rule import AuditLog
 from app.schemas.expense import ExpenseCreate, ExpenseUpdate, AIReviewRequest
+from app.services.ai_review_presenter import enrich_review_result
 
 logger = logging.getLogger(__name__)
 
@@ -418,6 +419,15 @@ class ExpenseService:
                 await self.db.rollback()
             raise  # 重新抛出原始异常
 
+        # ===== Phase 2.5: 展示层字段收敛 =====
+        # workflow 返回的是「工作流原始结构」(final_reason / agent_results)，
+        # 而前端 AI 审核卡片消费的是 summary / issues / suggestions。
+        # 这里把原始结构映射成展示字段（只加不减，workflow 原有键全部保留），
+        # 使得同一份 result 同时满足两个消费方：
+        #   ① 本次 POST 响应的 AIReviewResponse.data
+        #   ② 落库的 expenses.ai_review_result（详情页读的就是它）
+        result = enrich_review_result(result)
+
         # ===== Phase 3: 短事务 — 乐观锁写回结果 =====
         # Phase 1 已设 version=snapshot_version+1，这里直接校验该版本
         current_version = snapshot_version + 1
@@ -575,11 +585,30 @@ class ExpenseService:
         )
         self.db.add(log)
 
+    @staticmethod
+    def _extract_submitter(expense: Expense) -> tuple:
+        """安全提取提交人姓名/部门.
+
+        直接复用 ``Expense.submitter_name`` / ``Expense.submitter_department``
+        只读属性，保证列表接口与详情接口（后者由 Pydantic 直接从 ORM 属性
+        取值）行为完全一致。
+
+        Returns:
+            (submitter_name, submitter_department)
+        """
+        return (
+            getattr(expense, "submitter_name", None),
+            getattr(expense, "submitter_department", None),
+        )
+
     def _expense_to_response(self, expense: Expense) -> dict:
         """将Expense模型转换为响应字典"""
+        submitter_name, submitter_department = self._extract_submitter(expense)
         return {
             "id": expense.id,
             "user_id": expense.user_id,
+            "submitter_name": submitter_name,
+            "submitter_department": submitter_department,
             "expense_no": expense.expense_no,
             "title": expense.title,
             "expense_type": expense.expense_type.value if isinstance(expense.expense_type, ExpenseType) else expense.expense_type,

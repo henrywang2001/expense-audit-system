@@ -126,7 +126,8 @@ def build_data(expense, user_info: dict | None = None) -> dict:
     etype = (
         expense.expense_type.value
         if hasattr(expense, "expense_type") and hasattr(expense.expense_type, "value")
-        else expense.expense_type if isinstance(expense, dict)
+        else expense.get("expense_type")
+        if isinstance(expense, dict)
         else str(getattr(expense, "expense_type", ""))
     )
 

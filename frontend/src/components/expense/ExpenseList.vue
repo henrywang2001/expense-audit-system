@@ -18,10 +18,12 @@
         style="width: 140px"
         @change="handleSearch"
       >
-        <el-option label="草稿" value="draft" />
-        <el-option label="待审批" value="pending" />
-        <el-option label="已通过" value="approved" />
-        <el-option label="已驳回" value="rejected" />
+        <el-option
+          v-for="(label, value) in ExpenseStatusLabels"
+          :key="value"
+          :label="label"
+          :value="value"
+        />
       </el-select>
       <el-select
         v-model="typeFilter"
@@ -37,16 +39,6 @@
           :value="value"
         />
       </el-select>
-      <el-date-picker
-        v-model="dateRange"
-        type="daterange"
-        range-separator="至"
-        start-placeholder="开始日期"
-        end-placeholder="结束日期"
-        value-format="YYYY-MM-DD"
-        style="width: 260px"
-        @change="handleSearch"
-      />
       <el-button type="primary" :icon="Search" @click="handleSearch">
         搜索
       </el-button>
@@ -158,7 +150,6 @@ const pageSize = ref(10)
 const searchKeyword = ref('')
 const statusFilter = ref('')
 const typeFilter = ref('')
-const dateRange = ref<string[]>([])
 
 function getStatusLabel(status: string): string {
   return ExpenseStatusLabels[status] || status
@@ -182,10 +173,8 @@ async function fetchData() {
     if (searchKeyword.value) params.keyword = searchKeyword.value
     if (statusFilter.value) params.status = statusFilter.value
     if (typeFilter.value) params.expense_type = typeFilter.value
-    if (dateRange.value && dateRange.value.length === 2) {
-      params.start_date = dateRange.value[0]
-      params.end_date = dateRange.value[1]
-    }
+    // ⚠️ 后端 GET /expenses/ 不接受 start_date / end_date 查询参数，
+    //    传了也只会被忽略，故不再拼接（对应的日期控件已一并移除）。
     const res = await getExpenseList(params)
     expenses.value = res.data || []
     total.value = res.total || 0
@@ -205,7 +194,6 @@ function handleReset() {
   searchKeyword.value = ''
   statusFilter.value = ''
   typeFilter.value = ''
-  dateRange.value = []
   currentPage.value = 1
   fetchData()
 }

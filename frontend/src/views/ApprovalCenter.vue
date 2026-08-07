@@ -21,9 +21,12 @@
         style="width: 140px"
         @change="handleSearch"
       >
-        <el-option label="待审批" value="pending" />
-        <el-option label="已通过" value="approved" />
-        <el-option label="已驳回" value="rejected" />
+        <el-option
+          v-for="(label, value) in ApprovalStatusLabels"
+          :key="value"
+          :label="label"
+          :value="value"
+        />
       </el-select>
       <el-button type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
       <el-button :icon="RefreshRight" @click="handleReset">重置</el-button>
@@ -36,15 +39,19 @@
         <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip />
         <el-table-column label="类型" width="100">
           <template #default="{ row }">
-            {{ getTypeLabel(row.expense_type) }}
+            {{ getTypeLabel(row.expense_type || '') }}
           </template>
         </el-table-column>
         <el-table-column label="金额" width="140" align="right">
           <template #default="{ row }">
-            <span class="amount-cell">¥{{ row.total_amount.toFixed(2) }}</span>
+            <span class="amount-cell">¥{{ (row.total_amount ?? 0).toFixed(2) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="user_id" label="提交人ID" width="100" />
+        <el-table-column label="审批人" width="120">
+          <template #default="{ row }">
+            {{ row.approver_name || ('审批人#' + row.approver_id) }}
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="100" align="center">
           <template #default="{ row }">
             <el-tag :type="getStatusColor(row.status)" size="small">
@@ -54,7 +61,7 @@
         </el-table-column>
         <el-table-column label="提交时间" width="120">
           <template #default="{ row }">
-            {{ formatDate(row.created_at, 'YYYY-MM-DD') }}
+            {{ formatDate(row.created_at || '', 'YYYY-MM-DD') }}
           </template>
         </el-table-column>
         <el-table-column label="操作" width="220" fixed="right" align="center">
@@ -92,15 +99,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, RefreshRight } from '@element-plus/icons-vue'
 import Pagination from '@/components/common/Pagination.vue'
 import { getApprovalList, approveExpense, rejectExpense } from '@/api/approval'
-import type { Expense } from '@/types/expense'
-import { ExpenseStatusLabels, ExpenseStatusColors, ExpenseTypeLabels } from '@/types/expense'
-import { useUserStore } from '@/stores/user'
+import type { ApprovalRecord } from '@/types/expense'
+import { ApprovalStatusLabels, ApprovalStatusColors, ExpenseTypeLabels } from '@/types/expense'
 import { formatDate } from '@/utils/helpers'
 
 const router = useRouter()
-const userStore = useUserStore()
 
-const approvalList = ref<Expense[]>([])
+const approvalList = ref<ApprovalRecord[]>([])
 const total = ref(0)
 const loading = ref(false)
 const currentPage = ref(1)
@@ -109,11 +114,11 @@ const searchKeyword = ref('')
 const statusFilter = ref('')
 
 function getStatusLabel(status: string): string {
-  return ExpenseStatusLabels[status] || status
+  return ApprovalStatusLabels[status] || status
 }
 
 function getStatusColor(status: string): string {
-  return ExpenseStatusColors[status] || 'info'
+  return ApprovalStatusColors[status] || 'info'
 }
 
 function getTypeLabel(type: string): string {
@@ -148,11 +153,16 @@ function handleReset() {
   fetchData()
 }
 
-function handleView(row: Expense) {
-  router.push(`/expense/detail/${row.id}`)
+/**
+ * ⚠️ 列表元素是【审批记录】，`row.id` 是审批记录 id。
+ *    跳转报销详情必须用 `row.expense_id`，否则会打开一张风马牛不相及的报销单。
+ *    而下方 handleApprove / handleReject 传的才是 `row.id`（审批记录 id），二者不可混用。
+ */
+function handleView(row: ApprovalRecord) {
+  router.push(`/expense/detail/${row.expense_id}`)
 }
 
-async function handleApprove(row: Expense) {
+async function handleApprove(row: ApprovalRecord) {
   try {
     const { value: comment } = await ElMessageBox.prompt('请输入审批意见（可选）', '审批通过', {
       confirmButtonText: '确认通过',
@@ -170,7 +180,7 @@ async function handleApprove(row: Expense) {
   }
 }
 
-async function handleReject(row: Expense) {
+async function handleReject(row: ApprovalRecord) {
   try {
     const { value: comment } = await ElMessageBox.prompt('请输入驳回原因', '审批驳回', {
       confirmButtonText: '确认驳回',

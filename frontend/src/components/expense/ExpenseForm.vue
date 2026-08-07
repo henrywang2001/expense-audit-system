@@ -106,6 +106,17 @@
               />
             </template>
           </el-table-column>
+          <el-table-column label="发票号" width="160">
+            <template #default="{ row }">
+              <el-input
+                v-model="row.invoice_no"
+                placeholder="发票号（选填）"
+                size="small"
+                maxlength="100"
+                clearable
+              />
+            </template>
+          </el-table-column>
           <el-table-column label="发票" width="120">
             <template #default="{ row, $index }">
               <el-upload
@@ -114,7 +125,11 @@
                 :show-file-list="false"
                 @change="(file: any) => handleInvoiceUpload(file, $index)"
               >
-                <el-button size="small" :type="row.invoice_url ? 'success' : 'default'">
+                <el-button
+                  size="small"
+                  :type="row.invoice_url ? 'success' : 'default'"
+                  :loading="uploadingIndex === $index"
+                >
                   {{ row.invoice_url ? '已上传' : '上传' }}
                 </el-button>
               </el-upload>
@@ -152,14 +167,18 @@
 import { ref, reactive, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { createExpense, submitExpense } from '@/api/expense'
+import { createExpense, submitExpense, uploadInvoice } from '@/api/expense'
 import type { ExpenseCreate, ExpenseItemCreate } from '@/types/expense'
 import { ExpenseTypeLabels } from '@/types/expense'
+// Plus / Delete 以 `:icon="..."` 绑定表达式引用，<script setup> 中必须显式 import
+import { Plus, Delete } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const formRef = ref<FormInstance>()
 const saving = ref(false)
 const submitting = ref(false)
+/** 正在上传发票的明细行下标，-1 表示当前无上传中的行 */
+const uploadingIndex = ref(-1)
 
 const typeOptions = ExpenseTypeLabels
 
@@ -198,6 +217,7 @@ function addItem() {
     description: '',
     amount: 0,
     expense_date: new Date().toISOString().split('T')[0],
+    invoice_no: '',
     invoice_url: undefined
   })
 }
@@ -206,8 +226,36 @@ function removeItem(index: number) {
   formData.items.splice(index, 1)
 }
 
-function handleInvoiceUpload(file: any, index: number) {
-  formData.items[index].invoice_url = file.name
+/**
+ * 真正把发票文件传到后端并回填服务端 URL。
+ * ⚠️ 旧实现直接写 `file.name`（只是本地文件名，服务器上并不存在该资源），
+ *    必须走 POST /expenses/upload-invoice 拿 `res.data.url`。
+ */
+async function handleInvoiceUpload(file: any, index: number) {
+  const raw: File | undefined = file?.raw
+  if (!raw) {
+    ElMessage.warning('未获取到文件，请重新选择')
+    return
+  }
+  if (index < 0 || index >= formData.items.length) return
+
+  uploadingIndex.value = index
+  try {
+    const res = await uploadInvoice(raw)
+    const url = res?.data?.url
+    if (!url) {
+      ElMessage.error('发票上传失败：服务端未返回文件地址')
+      return
+    }
+    formData.items[index].invoice_url = url
+    ElMessage.success('发票上传成功')
+  } catch (error) {
+    // 拦截器已按状态码弹过一次错误，这里补一条业务语境提示便于定位
+    console.error('Upload invoice failed:', error)
+    ElMessage.error('发票上传失败，请重试')
+  } finally {
+    uploadingIndex.value = -1
+  }
 }
 
 function resetForm() {

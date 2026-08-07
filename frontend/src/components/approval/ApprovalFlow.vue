@@ -18,12 +18,16 @@ const props = defineProps<{
   hasAIReview?: boolean
 }>()
 
+// 键必须取自后端 ExpenseStatus 七态（draft/submitted/pending/approved/rejected/paid/cancelled），
+// 不存在 `withdrawn` 状态：撤回后报销单回到 draft。
 const stepMap: Record<string, number> = {
   draft: 0,
+  submitted: 1,
   pending: 1,
   approved: 4,
   rejected: 0,
-  withdrawn: 0
+  paid: 4,
+  cancelled: 0
 }
 
 const activeStep = computed(() => {

@@ -41,6 +41,8 @@
 import { ref } from 'vue'
 import { useUserStore } from '@/stores/user'
 import { ElMessage } from 'element-plus'
+// Bell 以 `:icon="Bell"` 绑定表达式引用，<script setup> 中必须显式 import
+import { Bell } from '@element-plus/icons-vue'
 
 const userStore = useUserStore()
 const pendingCount = ref(0)

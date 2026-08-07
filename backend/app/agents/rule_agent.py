@@ -170,7 +170,7 @@ class RuleAgent(BaseAgent):
                             ),
                             logic=sc,
                             action=r.action,
-                            message=f"{r.name}不符合规则",
+                            message=self._rule_message(r),
                             description=r.condition,  # 原文作人类可读描述
                             exec_mode=getattr(r, "exec_mode", "deterministic") or "deterministic",
                         ))
@@ -185,7 +185,7 @@ class RuleAgent(BaseAgent):
                             ),
                             logic={},
                             action=r.action,
-                            message=f"{r.name}不符合规则",
+                            message=self._rule_message(r),
                             description=r.condition,
                             exec_mode="semantic",
                         ))
@@ -228,6 +228,50 @@ class RuleAgent(BaseAgent):
                     logger.warning(f"自定义规则解析失败, 跳过: {e}")
 
         return rules
+
+    @staticmethod
+    def _rule_message(rule: Rule) -> str:
+        """取规则命中文案：优先库中自定义 message，为空则回退默认文案。
+
+        与 ``app/api/v1/rule.py::_resolve_rule_message`` 保持一致语义，
+        保证「规则管理页展示的文案」与「AI 审核实际输出的文案」一致。
+        """
+        custom = getattr(rule, "message", None)
+        if custom and str(custom).strip():
+            return str(custom)
+        return f"{rule.name}不符合规则"
+
+    @staticmethod
+    def _build_user_context(user_info: Dict[str, Any] | None) -> str:
+        """构造提交人上下文片段，供语义规则 prompt 使用。
+
+        缺少用户信息时返回空提示串，避免 prompt 出现 ``None`` 字面量。
+
+        Args:
+            user_info: 形如 {"full_name": ..., "department": ...,
+                            "position": ..., "role": ...} 的用户信息字典
+
+        Returns:
+            可直接嵌入 prompt 的中文上下文段落
+        """
+        if not user_info or not isinstance(user_info, dict):
+            return "提交人信息：未提供。"
+
+        field_labels = (
+            ("full_name", "姓名"),
+            ("username", "账号"),
+            ("department", "部门"),
+            ("position", "职位"),
+            ("role", "角色"),
+        )
+        parts = [
+            f"{label}: {user_info.get(key)}"
+            for key, label in field_labels
+            if user_info.get(key)
+        ]
+        if not parts:
+            return "提交人信息：未提供。"
+        return "提交人信息：\n" + "\n".join(f"- {p}" for p in parts)
 
     def _get_default_rules(self) -> List[RuleDef]:
         """获取默认审核规则 (json-logic 形式, 兼容 maykin-json-logic-py)"""

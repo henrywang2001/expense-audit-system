@@ -26,6 +26,18 @@ router = APIRouter()
 
 # ========== 辅助 ==========
 
+def _resolve_rule_message(rule: Rule) -> str:
+    """解析规则命中提示文案.
+
+    优先使用用户自定义并落库的 ``message``; 为空 (旧数据 / 未填写) 时
+    回退为历史默认文案 ``f"{name}不符合规则"``, 保证契约不破坏.
+    """
+    custom = getattr(rule, "message", None)
+    if custom and str(custom).strip():
+        return str(custom)
+    return f"{rule.name}不符合规则"
+
+
 def _rule_to_response(rule: Rule) -> dict:
     """将 ORM 对象转为 response 字典 (含 computed 字段)"""
     logic = rule.structured_condition or {}
@@ -41,10 +53,12 @@ def _rule_to_response(rule: Rule) -> dict:
         ),
         "logic": logic,
         "action": rule.action,
-        "message": f"{rule.name}不符合规则",
+        "message": _resolve_rule_message(rule),
         "description": rule.condition,
         "exec_mode": (rule.exec_mode or "semantic"),
         "is_active": bool(rule.is_active),
+        "created_at": getattr(rule, "created_at", None),
+        "updated_at": getattr(rule, "updated_at", None),
     }
 
 
@@ -150,6 +164,7 @@ async def create_rule(
         rule_type=rt,
         condition=rule_data.description or rule_data.name,
         action=rule_data.action,
+        message=rule_data.message,  # ★ B2: 持久化自定义命中文案
         config=None,
         structured_condition=rule_data.logic,
         exec_mode=rule_data.exec_mode,

@@ -4,6 +4,7 @@
 RuleDef: 规则的内部表示，logic 字段存 json-logic 对象
 RuleCreate / RuleResponse: 规则管理 API 的入参/出参
 """
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
@@ -88,6 +89,8 @@ class RuleResponse(BaseModel):
     description: Optional[str] = None
     exec_mode: RuleExecMode = "deterministic"
     is_active: bool = True
+    created_at: Optional[datetime] = Field(None, description="创建时间")
+    updated_at: Optional[datetime] = Field(None, description="最后更新时间")
 
     class Config:
         from_attributes = True

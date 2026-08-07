@@ -71,6 +71,8 @@ export interface ExpenseItemCreate {
   description: string
   amount: number
   expense_date: string
+  /** 后端 ExpenseItemCreate.invoice_no（Optional[str], max_length=100），创建时可提交 */
+  invoice_no?: string
   invoice_url?: string
 }
 

@@ -4,9 +4,9 @@
       <el-timeline-item
         v-for="record in records"
         :key="record.id"
-        :timestamp="formatDate(record.created_at)"
-        :type="record.action === 'approve' ? 'success' : 'danger'"
-        :icon="record.action === 'approve' ? 'CircleCheck' : 'CircleClose'"
+        :timestamp="formatDate(record.created_at || '')"
+        :type="getStatusType(record.status)"
+        :icon="getStatusIcon(record.status)"
         placement="top"
       >
         <el-card shadow="hover" class="history-card">
@@ -14,16 +14,19 @@
             <div class="history-card__user">
               <el-avatar :size="32" icon="UserFilled" />
               <div>
-                <div class="history-card__name">{{ record.approver_name }}</div>
+                <!-- approver_name 后端可能为 null，回落到用户编号，不留空、也不臆造姓名 -->
+                <div class="history-card__name">
+                  {{ record.approver_name || ('审批人#' + record.approver_id) }}
+                </div>
                 <div class="history-card__role">审批人</div>
               </div>
             </div>
             <el-tag
-              :type="record.action === 'approve' ? 'success' : 'danger'"
+              :type="getStatusType(record.status)"
               size="default"
               effect="dark"
             >
-              {{ record.action === 'approve' ? '通过' : '驳回' }}
+              {{ getStatusLabel(record.status) }}
             </el-tag>
           </div>
           <div v-if="record.comment" class="history-card__comment">
@@ -40,7 +43,40 @@
 
 <script setup lang="ts">
 import type { ApprovalRecord } from '@/types/expense'
+import { ApprovalStatusLabels, ApprovalStatusColors } from '@/types/expense'
 import { formatDate } from '@/utils/helpers'
+import { CircleCheck, CircleClose, RefreshLeft, Clock } from '@element-plus/icons-vue'
+
+// 后端 ApprovalResponse 没有 `action` 字段，审批动作体现在 `status` 上。
+// 这里复用类型层已定义好的四态标签/配色，并映射对应的 Element Plus 图标组件。
+const statusIcons: Record<string, any> = {
+  approved: CircleCheck,
+  rejected: CircleClose,
+  returned: RefreshLeft,
+  pending: Clock
+}
+
+function getStatusIcon(status: string): any {
+  return statusIcons[status] || Clock
+}
+
+function getStatusLabel(status: string): string {
+  return ApprovalStatusLabels[status] || status
+}
+
+// el-timeline-item 的 type 仅接受特定字面量联合，这里用显式映射保证类型安全
+function getStatusType(
+  status: string
+): 'success' | 'info' | 'warning' | 'danger' | 'primary' {
+  return (
+    (ApprovalStatusColors[status] as
+      | 'success'
+      | 'info'
+      | 'warning'
+      | 'danger'
+      | 'primary') || 'info'
+  )
+}
 
 defineProps<{
   records: ApprovalRecord[]

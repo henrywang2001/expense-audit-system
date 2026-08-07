@@ -61,6 +61,12 @@ class ExpenseResponse(BaseModel):
     """报销单响应"""
     id: int
     user_id: int
+    submitter_name: Optional[str] = Field(
+        None, description="提交人姓名（取自 User.full_name，回退 username）"
+    )
+    submitter_department: Optional[str] = Field(
+        None, description="提交人部门（取自 User.department）"
+    )
     expense_no: str
     title: str
     expense_type: str

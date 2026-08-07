@@ -78,6 +78,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { useUserStore } from '@/stores/user'
 import type { LoginForm } from '@/types'
+// User / Lock 以 `:prefix-icon="..."` 绑定表达式引用，<script setup> 中必须显式 import
+import { User, Lock } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -110,16 +112,21 @@ function initParticles() {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
 
-  canvas.width = window.innerWidth
-  canvas.height = window.innerHeight
+  // 闭包（animate）内 TS 会丢失对 const 的收窄，故显式赋予非空类型，
+  // 一劳永逸消除 17 处 "possibly null" 报错。
+  const cv: HTMLCanvasElement = canvas
+  const c: CanvasRenderingContext2D = ctx
+
+  cv.width = window.innerWidth
+  cv.height = window.innerHeight
 
   const particles: Array<{ x: number; y: number; vx: number; vy: number; size: number; alpha: number }> = []
   const particleCount = 80
 
   for (let i = 0; i < particleCount; i++) {
     particles.push({
-      x: Math.random() * canvas.width,
-      y: Math.random() * canvas.height,
+      x: Math.random() * cv.width,
+      y: Math.random() * cv.height,
       vx: (Math.random() - 0.5) * 0.5,
       vy: (Math.random() - 0.5) * 0.5,
       size: Math.random() * 2 + 0.5,
@@ -128,21 +135,21 @@ function initParticles() {
   }
 
   function animate() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    c.clearRect(0, 0, cv.width, cv.height)
 
     particles.forEach((p, i) => {
       p.x += p.vx
       p.y += p.vy
 
-      if (p.x < 0) p.x = canvas.width
-      if (p.x > canvas.width) p.x = 0
-      if (p.y < 0) p.y = canvas.height
-      if (p.y > canvas.height) p.y = 0
+      if (p.x < 0) p.x = cv.width
+      if (p.x > cv.width) p.x = 0
+      if (p.y < 0) p.y = cv.height
+      if (p.y > cv.height) p.y = 0
 
-      ctx.beginPath()
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
-      ctx.fillStyle = `rgba(0, 212, 255, ${p.alpha})`
-      ctx.fill()
+      c.beginPath()
+      c.arc(p.x, p.y, p.size, 0, Math.PI * 2)
+      c.fillStyle = `rgba(0, 212, 255, ${p.alpha})`
+      c.fill()
 
       // Draw connections
       for (let j = i + 1; j < particles.length; j++) {
@@ -150,12 +157,12 @@ function initParticles() {
         const dy = particles[j].y - p.y
         const dist = Math.sqrt(dx * dx + dy * dy)
         if (dist < 150) {
-          ctx.beginPath()
-          ctx.moveTo(p.x, p.y)
-          ctx.lineTo(particles[j].x, particles[j].y)
-          ctx.strokeStyle = `rgba(0, 212, 255, ${0.1 * (1 - dist / 150)})`
-          ctx.lineWidth = 0.5
-          ctx.stroke()
+          c.beginPath()
+          c.moveTo(p.x, p.y)
+          c.lineTo(particles[j].x, particles[j].y)
+          c.strokeStyle = `rgba(0, 212, 255, ${0.1 * (1 - dist / 150)})`
+          c.lineWidth = 0.5
+          c.stroke()
         }
       }
     })

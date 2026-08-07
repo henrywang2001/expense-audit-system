@@ -31,11 +31,9 @@ instance.interceptors.request.use(
 instance.interceptors.response.use(
   (response: AxiosResponse) => {
     const { data } = response
-    // 后端返回 {success, data, message} 格式, 登录成功也走这里
-    if (data.code && data.code !== 200 && data.code !== 0) {
-      ElMessage.error(data.message || '请求失败')
-      return Promise.reject(new Error(data.message || '请求失败'))
-    }
+    // 后端三态响应（A: 分页信封 / B: 对象信封 / C: 裸响应）统一在此剥掉 axios 的一层，
+    // 业务层拿到的 `res` 即后端 payload 本身。
+    // ⚠️ 契约中没有 `code` 字段，切勿在此再加基于 code 的短路判断（会误杀裸响应）。
     return data
   },
   (error) => {

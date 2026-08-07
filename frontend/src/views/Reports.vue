@@ -3,21 +3,12 @@
     <div class="page-header">
       <h2 class="page-header__title">统计报表</h2>
       <div class="page-header__actions">
-        <el-date-picker
-          v-model="dateRange"
-          type="daterange"
-          range-separator="至"
-          start-placeholder="开始日期"
-          end-placeholder="结束日期"
-          value-format="YYYY-MM-DD"
-          @change="fetchStats"
-        />
-        <el-button type="primary" :icon="Refresh" @click="fetchStats">刷新</el-button>
+        <el-button type="primary" :icon="Refresh" :loading="loading" @click="fetchStats">刷新</el-button>
       </div>
     </div>
 
     <!-- Summary Cards -->
-    <div class="stat-cards">
+    <div class="stat-cards" v-loading="loading">
       <div class="stat-card">
         <div class="stat-card__icon stat-card__icon--blue">
           <el-icon><Document /></el-icon>
@@ -57,7 +48,7 @@
     </div>
 
     <!-- Charts -->
-    <div class="charts-grid">
+    <div class="charts-grid" v-loading="loading">
       <!-- Pie Chart - Expense by Type -->
       <el-card class="chart-card">
         <template #header>
@@ -107,13 +98,12 @@ import {
   LegendComponent,
   GridComponent
 } from 'echarts/components'
-import { getReportSummary, getReportByType, getReportByDepartment, getReportTrend } from '@/api/expense'
+import { getReportSummary, getReportByType, getReportByDepartment, getReportTrend } from '@/api/report'
 import { ExpenseTypeLabels } from '@/types/expense'
 
 use([CanvasRenderer, PieChart, BarChart, TitleComponent, TooltipComponent, LegendComponent, GridComponent])
 
 const loading = ref(false)
-const dateRange = ref<string[]>([])
 
 const summary = ref<any>({})
 const typeStats = ref<any[]>([])
@@ -394,15 +384,12 @@ function formatNumber(num: number): string {
 async function fetchStats() {
   loading.value = true
   try {
-    const params: any = {}
-    if (dateRange.value && dateRange.value.length === 2) {
-      params.start_date = dateRange.value[0]
-      params.end_date = dateRange.value[1]
-    }
+    // 报表接口均不消费 start_date/end_date 等 Query 参数（见 @/api/report 注释），
+    // 故直接无参调用并保留 `res.data` 取值。
     const [summaryRes, typeRes, deptRes, trendRes] = await Promise.all([
-      getReportSummary(params),
-      getReportByType(params),
-      getReportByDepartment(params),
+      getReportSummary(),
+      getReportByType(),
+      getReportByDepartment(),
       getReportTrend(12)
     ])
     summary.value = summaryRes.data || {}

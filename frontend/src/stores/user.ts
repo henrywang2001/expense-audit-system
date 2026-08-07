@@ -19,17 +19,25 @@ export const useUserStore = defineStore('user', () => {
     return roles.includes(userRole.value)
   }
 
+  /**
+   * 侧边栏菜单项。
+   * ⚠️ 这里的显隐必须与 `router/index.ts` 中各路由的 `meta.roles` 保持一致，
+   *    否则会出现「菜单可见但进入即被守卫弹回 /dashboard」的割裂体验。
+   *    当前受限页面：/rules 与 /reports —— 仅 admin / finance 可见。
+   */
   const menuItems = computed(() => {
-    const items = [
+    const isPrivileged = userRole.value === 'admin' || userRole.value === 'finance'
+
+    const items: Array<{ path: string; title: string; icon: string }> = [
       { path: '/dashboard', title: '工作台', icon: 'Monitor' },
       { path: '/expense/submit', title: '提交报销', icon: 'Edit' },
       { path: '/expense/list', title: '我的报销', icon: 'Document' },
-      { path: '/approval', title: '审批中心', icon: 'Checked' },
-      { path: '/reports', title: '统计报表', icon: 'PieChart' }
+      { path: '/approval', title: '审批中心', icon: 'Checked' }
     ]
 
-    if (userRole.value === 'admin' || userRole.value === 'finance') {
-      items.splice(4, 0, { path: '/rules', title: '规则管理', icon: 'Setting' })
+    if (isPrivileged) {
+      items.push({ path: '/rules', title: '规则管理', icon: 'Setting' })
+      items.push({ path: '/reports', title: '统计报表', icon: 'PieChart' })
     }
 
     return items

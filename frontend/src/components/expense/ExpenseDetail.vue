@@ -30,13 +30,11 @@
               ¥{{ expense.total_amount.toFixed(2) }}
             </span>
           </div>
+          <!-- 后端 ExpenseResponse 只返回 user_id，没有提交人姓名 / 部门字段，
+               这里如实显示用户编号，不臆造姓名，也不再把用户编号伪装成"部门"。 -->
           <div class="detail-info__item">
             <span class="detail-info__item-label">提交人：</span>
-            <span class="detail-info__item-value">{{ expense.user_id }}</span>
-          </div>
-          <div class="detail-info__item">
-            <span class="detail-info__item-label">部门：</span>
-            <span class="detail-info__item-value">{{ expense.user_id ? '用户#' + expense.user_id : '' }}</span>
+            <span class="detail-info__item-value">用户#{{ expense.user_id }}</span>
           </div>
           <div class="detail-info__item">
             <span class="detail-info__item-label">创建时间：</span>
@@ -62,9 +60,16 @@
           <el-table-column label="序号" width="60" align="center">
             <template #default="{ $index }">{{ $index + 1 }}</template>
           </el-table-column>
+          <!-- category_id 是费用类别表的主键，与 ExpenseTypeLabels（报销类型枚举）
+               不是同一套字典，不能拿它去查表，否则永远查不中并回落成数字。 -->
           <el-table-column label="费用类别" width="120">
             <template #default="{ row }">
-              {{ row.category_id ? getTypeLabel(String(row.category_id)) : '-' }}
+              {{ row.category_id ?? '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="发票号" width="150" show-overflow-tooltip>
+            <template #default="{ row }">
+              {{ row.invoice_no || '-' }}
             </template>
           </el-table-column>
           <el-table-column prop="description" label="描述" min-width="200" show-overflow-tooltip />
@@ -96,27 +101,27 @@
       </el-card>
 
       <!-- AI Review -->
-      <el-card v-if="expense.ai_review" class="mb-md ai-review-card">
+      <el-card v-if="expense.ai_review_result" class="mb-md ai-review-card">
         <template #header>
           <div class="ai-review-header">
             <el-icon size="20" color="#409eff"><Cpu /></el-icon>
             <span class="card-header-title">AI 审核结果</span>
             <el-tag
-              :type="expense.ai_review.risk_level === 'high' ? 'danger' : expense.ai_review.risk_level === 'medium' ? 'warning' : 'success'"
+              :type="getRiskTagType(expense.ai_review_result.risk_level)"
               size="small"
             >
-              风险等级：{{ getRiskLabel(expense.ai_review.risk_level) }}
+              风险等级：{{ getRiskLabel(expense.ai_review_result.risk_level) }}
             </el-tag>
           </div>
         </template>
         <div class="ai-review-body">
           <div class="ai-review-summary">
-            <strong>审核摘要：</strong>{{ expense.ai_review.summary }}
+            <strong>审核摘要：</strong>{{ formatAiSummary(expense.ai_review_result.summary) }}
           </div>
-          <div v-if="expense.ai_review.issues && expense.ai_review.issues.length > 0" class="mt-md">
+          <div v-if="expense.ai_review_result.issues && expense.ai_review_result.issues.length > 0" class="mt-md">
             <strong>发现的问题：</strong>
             <div
-              v-for="(issue, idx) in expense.ai_review.issues"
+              v-for="(issue, idx) in expense.ai_review_result.issues"
               :key="idx"
               class="ai-review-issue"
               :class="`ai-review-issue--${issue.severity}`"
@@ -127,43 +132,21 @@
               <span>{{ issue.description }}</span>
             </div>
           </div>
-          <div v-if="expense.ai_review.suggestions && expense.ai_review.suggestions.length > 0" class="mt-md">
+          <div v-if="expense.ai_review_result.suggestions && expense.ai_review_result.suggestions.length > 0" class="mt-md">
             <strong>改进建议：</strong>
             <ul class="suggestion-list">
-              <li v-for="(sug, idx) in expense.ai_review.suggestions" :key="idx">{{ sug }}</li>
+              <li v-for="(sug, idx) in expense.ai_review_result.suggestions" :key="idx">{{ sug }}</li>
             </ul>
           </div>
         </div>
       </el-card>
 
       <!-- Approval History -->
-      <el-card v-if="expense.approval_records && expense.approval_records.length > 0" class="mb-md">
+      <el-card v-if="approvalRecords.length > 0" class="mb-md">
         <template #header>
           <span class="card-header-title">审批记录</span>
         </template>
-        <el-timeline>
-          <el-timeline-item
-            v-for="record in expense.approval_records"
-            :key="record.id"
-            :timestamp="formatDate(record.created_at)"
-            :type="record.action === 'approve' ? 'success' : 'danger'"
-            :icon="record.action === 'approve' ? 'CircleCheck' : 'CircleClose'"
-          >
-            <div class="timeline-item">
-              <strong>{{ record.approver_name }}</strong>
-              <el-tag
-                :type="record.action === 'approve' ? 'success' : 'danger'"
-                size="small"
-                class="ml-sm"
-              >
-                {{ record.action === 'approve' ? '通过' : '驳回' }}
-              </el-tag>
-            </div>
-            <div v-if="record.comment" class="timeline-comment">
-              {{ record.comment }}
-            </div>
-          </el-timeline-item>
-        </el-timeline>
+        <ApprovalHistory :records="approvalRecords" />
       </el-card>
 
       <!-- Action Buttons -->
@@ -186,24 +169,38 @@
         >
           撤回
         </el-button>
-        <el-button
-          v-if="expense.status === 'pending' && canApprove"
-          type="success"
-          :icon="Select"
-          :loading="actionLoading"
-          @click="handleApprove"
-        >
-          通过
-        </el-button>
-        <el-button
-          v-if="expense.status === 'pending' && canApprove"
-          type="danger"
-          :icon="CloseBold"
-          :loading="actionLoading"
-          @click="handleReject"
-        >
-          驳回
-        </el-button>
+        <!-- 只有当前用户名下确实存在一条 pending 审批记录时才允许直接审批，
+             否则没有可用的 approval_id，点了必然打到错误的记录上。 -->
+        <template v-if="expense.status === 'pending' && canApprove">
+          <template v-if="myPendingApproval">
+            <el-button
+              type="success"
+              :icon="Select"
+              :loading="actionLoading"
+              @click="handleApprove"
+            >
+              通过
+            </el-button>
+            <el-button
+              type="danger"
+              :icon="CloseBold"
+              :loading="actionLoading"
+              @click="handleReject"
+            >
+              驳回
+            </el-button>
+          </template>
+          <el-tooltip
+            v-else
+            content="当前没有分配给你的待办审批记录，请到审批中心处理"
+            placement="top"
+          >
+            <span class="approve-disabled-hint">
+              <el-button type="success" :icon="Select" disabled>通过</el-button>
+              <el-button type="danger" :icon="CloseBold" disabled>驳回</el-button>
+            </span>
+          </el-tooltip>
+        </template>
         <el-button
           v-if="expense.status === 'pending' || expense.status === 'draft'"
           type="info"
@@ -223,18 +220,22 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+// Upload / Download / Select / CloseBold 以 `:icon="..."` 绑定表达式引用，必须显式 import
+import { Upload, Download, Select, CloseBold } from '@element-plus/icons-vue'
 import { getExpenseDetail, submitExpense, withdrawExpense, aiReviewExpense } from '@/api/expense'
-import { approveExpense, rejectExpense } from '@/api/approval'
+import { approveExpense, rejectExpense, getApprovalHistoryByExpense } from '@/api/approval'
 import { useUserStore } from '@/stores/user'
-import type { Expense } from '@/types/expense'
+import type { Expense, ExpenseItem, ApprovalRecord } from '@/types/expense'
 import { ExpenseStatusLabels, ExpenseStatusColors, ExpenseTypeLabels } from '@/types/expense'
 import { formatDate } from '@/utils/helpers'
+import ApprovalHistory from '@/components/approval/ApprovalHistory.vue'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 
 const expense = ref<Expense | null>(null)
+const approvalRecords = ref<ApprovalRecord[]>([])
 const loading = ref(false)
 const actionLoading = ref(false)
 const aiReviewLoading = ref(false)
@@ -245,6 +246,19 @@ const isOwner = computed(() => {
 
 const canApprove = computed(() => {
   return userStore.hasPermission(['admin', 'finance']) && !isOwner.value
+})
+
+/**
+ * 当前登录用户名下、属于本报销单的那条【待审批记录】。
+ * ⚠️ POST /approvals/{approval_id}/approve|reject 收的是【审批记录 id】，
+ *    绝不能传报销单 id —— 那会命中另一条毫不相干的审批记录。
+ */
+const myPendingApproval = computed<ApprovalRecord | undefined>(() => {
+  const uid = userStore.user?.id
+  if (!uid) return undefined
+  return approvalRecords.value.find(
+    (r) => r.status === 'pending' && r.approver_id === uid
+  )
 })
 
 const canAct = computed(() => {
@@ -267,8 +281,20 @@ function getTypeLabel(type: string): string {
 }
 
 function getRiskLabel(level: string): string {
-  const labels: Record<string, string> = { low: '低', medium: '中', high: '高' }
+  const labels: Record<string, string> = {
+    low: '低',
+    medium: '中',
+    high: '高',
+    critical: '极高'
+  }
   return labels[level] || level
+}
+
+/** critical 必须排在 high 之前判断，否则极高风险会被渲染成 success（绿色）。 */
+function getRiskTagType(level: string): 'danger' | 'warning' | 'success' {
+  if (level === 'critical' || level === 'high') return 'danger'
+  if (level === 'medium') return 'warning'
+  return 'success'
 }
 
 async function fetchDetail() {
@@ -282,12 +308,44 @@ async function fetchDetail() {
   try {
     const res = await getExpenseDetail(id)
     expense.value = res.data
+    // 审批记录走专用接口（后端 /approvals/{expense_id}/history，返回裸数组），
+    // 不再依赖 expense.approval_records 内联字段。
+    await fetchApprovalRecords(id)
   } catch (error) {
     console.error('Fetch expense detail error:', error)
     ElMessage.error('获取报销单详情失败')
   } finally {
     loading.value = false
   }
+}
+
+async function fetchApprovalRecords(expenseId: number) {
+  try {
+    const res = await getApprovalHistoryByExpense(expenseId)
+    approvalRecords.value = res.data || []
+  } catch (error) {
+    console.error('Fetch approval history error:', error)
+    approvalRecords.value = []
+  }
+}
+
+/** 兼容 summary 为字符串或结构化对象的渲染 */
+function formatAiSummary(summary: string | Record<string, any> | undefined): string {
+  if (!summary) return '无'
+  if (typeof summary === 'string') return summary
+  if (typeof summary === 'object') {
+    const parts: string[] = []
+    if (summary.overall) parts.push(String(summary.overall))
+    if (summary.conclusion) parts.push(String(summary.conclusion))
+    if (summary.summary) parts.push(String(summary.summary))
+    if (parts.length > 0) return parts.join('；')
+    try {
+      return JSON.stringify(summary, null, 2)
+    } catch {
+      return '（结构化审核摘要）'
+    }
+  }
+  return String(summary)
 }
 
 async function handleSubmit() {
@@ -334,6 +392,11 @@ async function handleWithdraw() {
 
 async function handleApprove() {
   if (!expense.value) return
+  const approvalId = myPendingApproval.value?.id
+  if (!approvalId) {
+    ElMessage.warning('当前没有分配给你的待办审批记录，请到审批中心处理')
+    return
+  }
   try {
     const { value: comment } = await ElMessageBox.prompt('请输入审批意见（可选）', '审批通过', {
       confirmButtonText: '确认通过',
@@ -342,7 +405,7 @@ async function handleApprove() {
       inputPlaceholder: '请输入审批意见...'
     })
     actionLoading.value = true
-    await approveExpense(expense.value.id, comment || undefined)
+    await approveExpense(approvalId, comment || undefined)
     ElMessage.success('审批已通过')
     await fetchDetail()
   } catch (error: any) {
@@ -356,6 +419,11 @@ async function handleApprove() {
 
 async function handleReject() {
   if (!expense.value) return
+  const approvalId = myPendingApproval.value?.id
+  if (!approvalId) {
+    ElMessage.warning('当前没有分配给你的待办审批记录，请到审批中心处理')
+    return
+  }
   try {
     const { value: comment } = await ElMessageBox.prompt('请输入驳回原因', '审批驳回', {
       confirmButtonText: '确认驳回',
@@ -368,7 +436,7 @@ async function handleReject() {
       }
     })
     actionLoading.value = true
-    await rejectExpense(expense.value.id, comment || '')
+    await rejectExpense(approvalId, comment || '')
     ElMessage.success('报销单已驳回')
     await fetchDetail()
   } catch (error: any) {
@@ -394,8 +462,13 @@ async function handleAIReview() {
   }
 }
 
-function handlePreviewInvoice(item: any) {
-  ElMessage.info('发票预览功能开发中')
+/** 发票文件由后端以 /uploads/... 静态目录提供，已通过 vite 代理同源访问，直接新窗口打开即可。 */
+function handlePreviewInvoice(item: ExpenseItem) {
+  if (!item.invoice_url) {
+    ElMessage.warning('该费用明细没有关联发票')
+    return
+  }
+  window.open(item.invoice_url, '_blank', 'noopener')
 }
 
 function handleBack() {
@@ -518,6 +591,13 @@ onMounted(() => {
   justify-content: center;
   gap: $spacing-sm;
   padding: $spacing-lg 0;
+}
+
+// el-tooltip 无法直接挂在 disabled 的按钮上（disabled 元素不触发鼠标事件），
+// 故用一个 inline-flex 包裹层承载 tooltip。
+.approve-disabled-hint {
+  display: inline-flex;
+  gap: $spacing-sm;
 }
 
 .ml-sm {

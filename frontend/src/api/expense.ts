@@ -52,8 +52,15 @@ export function withdrawExpense(id: number): Promise<ApiResponse<null>> {
 }
 
 // ⚠️ 后端 AIReviewRequest.expense_id 为必填字段，不传 body 必然 422。
+// ⚠️ 后端 AI 审核实际耗时约 89s，远超全局 30s 超时会导致请求被 abort。
+//    此处通过 axios config 的 `timeout` 单接口放宽到 120s，覆盖全局默认值，
+//    其它接口仍保持 30s（全局默认 timeout 不动）。
 export function aiReviewExpense(id: number): Promise<ApiResponse<AIReviewResponse>> {
-  return post<ApiResponse<AIReviewResponse>>(`/expenses/${id}/ai-review`, { expense_id: id })
+  return post<ApiResponse<AIReviewResponse>>(
+    `/expenses/${id}/ai-review`,
+    { expense_id: id },
+    { timeout: 120000 }
+  )
 }
 
 export function uploadInvoice(file: File): Promise<ApiResponse<UploadInvoiceResult>> {

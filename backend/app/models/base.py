@@ -131,4 +131,10 @@ def _migrate_rule_columns(engine):
                 "ALTER TABLE rules ADD COLUMN exec_mode "
                 "VARCHAR(20) NOT NULL DEFAULT 'semantic'"
             ))
+        if "message" not in existing_cols:
+            # 规则命中提示文案（可定制并落库）；旧行默认空串，读取时回退为
+            # f"{name}不符合规则"
+            conn.execute(text(
+                "ALTER TABLE rules ADD COLUMN message VARCHAR(500) DEFAULT ''"
+            ))
         conn.commit()
