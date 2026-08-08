@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     TEMPERATURE: float = 0.0
     MAX_TOKENS: int = 4096
     DASHSCOPE_API_KEY: str
-    DASHSCOPE_API_BASE: str = "https://llm-pszva1pkca2z60ha.cn-beijing.maas.aliyuncs.com/api/v1"
+    DASHSCOPE_API_BASE: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     EMBEDDING_MODEL: str = "text-embedding-v1"
     CHROMA_PERSIST_DIR: str = "./data/chroma"
     CHROMA_COLLECTION: str = "expense_knowledge"
