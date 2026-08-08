@@ -2,9 +2,13 @@
 
 基于 AI Agent 技术的智能化财务报销审核系统，集成 LLM 大模型、**json-logic 确定性规则引擎**、RAG 知识检索、**LangGraph StateGraph 工作流编排**、LangChain 框架，实现报销单据的智能识别、规则校验、风险预警和自动化审批流程。
 
-> **2026-08-04 更新**：
+> **2026-08-08 更新**：
+> - **AI 审核展示层收敛** — 新增 `ai_review_presenter` 服务，将 workflow 原始结构映射为统一的 `summary/issues/suggestions` 展示字段，前端卡片和详情页消费同一份数据。
+> - **规则管理全面升级** — 规则 CRUD 端点增强，前端 RuleManagement.vue 全面重写。
+> - **前端 UI 增强** — ExpenseDetail/ExpenseForm/ExpenseList/ApprovalCenter/Login/Reports 全面优化。
 > - **json-logic 确定性规则引擎** — RuleAgent 从 LLM 裁判升级为零次 LLM 调用的确定性求值器，规则可后台 CRUD、结果 100% 可复现、脏数据 fail-loud。
 > - **并发安全 + 幂等去重 + 事务拆分改造** — 补齐状态机、乐观锁、缓存三大漏洞。
+> - **bcrypt 兼容性修复** — 绕过 passlib 的 bcrypt 5.x 不兼容问题，直接使用 bcrypt 原生 API。
 > - 详见各自章节。
 
 ## 技术栈
@@ -25,7 +29,10 @@
 | Vue 3 | 3.4.0+ | 前端框架 |
 | Element Plus | 2.4.0+ | UI组件库 |
 | Pinia | 2.1.0+ | 状态管理 |
+| Vue Router | 4.2.0+ | 前端路由 |
 | Axios | 1.6.0+ | HTTP客户端 |
+| ECharts | 5.4.0+ | 数据可视化图表 |
+| TypeScript | 5.6.0+ | 类型安全 |
 
 ## 核心功能
 
@@ -47,14 +54,17 @@ expense-audit-system/
 │   ├── app/
 │   │   ├── main.py            # FastAPI应用入口
 │   │   ├── config.py          # 配置管理
-│   │   ├── dependencies.py    # 依赖注入（DB会话）
+│   │   ├── dependencies.py    # 依赖注入（DB会话/引擎工厂）
 │   │   ├── api/               # API路由
+│   │   │   ├── deps.py            # 路由层依赖（get_current_user / 权限校验）
 │   │   │   └── v1/            # API v1 接口
-│   │   │       ├── agent.py   # Agent工作流接口 ★
-│   │   │       ├── expense.py # 报销CRUD + AI审核接口
-│   │   │       ├── approval.py# 审批流程接口
-│   │   │       ├── auth.py    # 认证接口
-│   │   │       └── report.py  # 报表接口
+│   │   │       ├── router.py      # ★ 路由注册器
+│   │   │       ├── agent.py       # Agent工作流接口 ★
+│   │   │       ├── expense.py     # 报销CRUD + AI审核接口
+│   │   │       ├── approval.py    # 审批流程接口
+│   │   │       ├── auth.py        # 认证接口（含修改密码）
+│   │   │       ├── rule.py        # ★ 规则 CRUD API
+│   │   │       └── report.py      # 报表接口
 │   │   ├── core/              # 核心模块
 │   │   │   ├── security.py    # JWT安全
 │   │   │   ├── exceptions.py  # 自定义异常（含ConflictException）
@@ -71,11 +81,14 @@ expense-audit-system/
 │   │   │   ├── expense.py     # ★ AIReviewRequest（含idempotency_key）
 │   │   │   ├── agent.py       # ★ AgentExecuteRequest（含idempotency_key）
 │   │   │   ├── rule.py        # ★ RuleDef + CRUD schemas (json-logic)
-│   │   │   └── ...
+│   │   │   ├── user.py        # 用户/登录/Token
+│   │   │   └── approval.py    # 审批相关
 │   │   ├── services/          # 业务服务层
 │   │   │   ├── expense_service.py # ★ ai_review 重写（4 Phase并发安全）
+│   │   │   ├── ai_review_presenter.py # ★ AI审核展示层收敛
 │   │   │   ├── approval_service.py
-│   │   │   └── ...
+│   │   │   ├── auth_service.py
+│   │   │   └── report_service.py
 │   │   ├── agents/            # AI Agent 模块
 │   │   │   ├── base_agent.py       # Agent 基类（结构化输出）
 │   │   │   ├── document_agent.py   # 文档解析 Agent
@@ -90,31 +103,60 @@ expense-audit-system/
 │   │   │       └── builder.py      # StateGraph构建器（条件路由+Send并行）
 │   │   ├── rag/               # RAG模块（向量存储/检索/嵌入）
 │   │   ├── tools/             # Agent工具（OCR/通知/数据库）
-│   │   └── utils/             # 工具函数
+│   │   └── utils/             # 工具函数（校验/辅助）
 │   ├── tests/                 # ★ 测试
+│   │   ├── __init__.py
 │   │   ├── conftest.py             # 共享 fixtures
 │   │   ├── test_workflow_routing.py # 条件路由测试 (13 tests)
 │   │   ├── test_graph.py           # 图编译/结构测试 (10 tests)
 │   │   ├── test_api_regression.py  # ★ API回归测试 (13 tests)
-│   │   └── test_rule_engine.py     # ★ 规则引擎测试 (42 tests)
+│   │   ├── test_rule_engine.py     # ★ 规则引擎测试 (42 tests)
+│   │   ├── test_api/               # API 专项测试
+│   │   ├── test_services/          # ★ Service 层测试（含 ai_review_presenter 22 tests）
+│   │   └── test_agents/            # Agent 层测试
 │   └── requirements.txt       # 依赖清单
 ├── frontend/                  # 前端项目
 │   ├── src/
 │   │   ├── main.ts            # 入口文件
 │   │   ├── App.vue            # 根组件
-│   │   ├── views/             # 页面
-│   │   ├── components/        # 组件
-│   │   ├── stores/            # Pinia状态
-│   │   ├── router/            # 路由
-│   │   ├── api/               # API接口
-│   │   └── utils/             # 工具
+│   │   ├── views/             # 页面视图
+│   │   │   ├── Login.vue          # 登录页
+│   │   │   ├── Dashboard.vue      # 首页仪表盘
+│   │   │   ├── ExpenseList.vue    # 报销列表
+│   │   │   ├── ExpenseSubmit.vue  # 提交报销
+│   │   │   ├── ExpenseDetailPage.vue # 报销详情
+│   │   │   ├── ApprovalCenter.vue  # ★ 审批中心
+│   │   │   ├── Reports.vue        # ★ 数据报表
+│   │   │   ├── RuleManagement.vue # ★ 规则管理 ← 全面重写
+│   │   │   └── NotFound.vue       # 404 页面
+│   │   ├── components/        # 可复用组件
+│   │   │   ├── common/            # Header / Sidebar / Pagination
+│   │   │   ├── expense/           # ExpenseList / ExpenseForm / ExpenseDetail
+│   │   │   └── approval/          # ApprovalFlow / ApprovalHistory
+│   │   ├── stores/            # Pinia 状态管理
+│   │   │   ├── user.ts        # 用户认证状态
+│   │   │   ├── expense.ts     # 报销数据
+│   │   │   └── approval.ts    # 审批数据
+│   │   ├── api/               # API 接口封装
+│   │   │   ├── auth.ts        # 认证 API
+│   │   │   ├── expense.ts     # 报销 API
+│   │   │   ├── approval.ts    # 审批 API
+│   │   │   ├── report.ts      # 报表 API
+│   │   │   └── rule.ts        # 规则管理 API
+│   │   ├── types/             # TypeScript 类型定义
+│   │   │   ├── index.ts       # 通用类型
+│   │   │   ├── expense.ts     # 报销类型
+│   │   │   └── rule.ts        # ★ 规则类型
+│   │   ├── router/            # 路由配置
+│   │   └── utils/             # 工具函数 (request.ts / helpers.ts)
 │   ├── package.json
-│   └── vite.config.ts
+│   ├── vite.config.ts
+│   └── .env.example           # 前端环境变量模板
 ├── 运行指南.md                 # 运行部署指南
 └── README.md                  # 项目说明（本文件）
 ```
 
-*★ 标记为本次并发幂等改造涉及的文件*
+*★ 标记为本次改造涉及的文件*
 
 ## AI Agent 工作流架构
 
@@ -275,9 +317,9 @@ POST /expense/{id}/ai-review ─┘
 
 | 层级 | 手段 | 防御场景 | 文件 |
 |------|------|----------|------|
-| **状态机** | `ALLOWED_STATUSES` 前置校验 + `ai_review_status == "running"` 检查 | 已审批单不被回退 / 同一单不并发跑两次 | `expense_service.py` |
-| **乐观锁** | `version` 字段 + `WHERE version=?` + `rowcount` 校验 | 并发更新互相覆盖 | `expense.py` / `expense_service.py` |
-| **幂等键** | `idempotency_key` + 缓存表 `AIReviewCache` (5min TTL) | 重复请求不重跑 LLM / 不产生重复日志 | `idempotency.py` / `schemas/` |
+| **状态机** | `ALLOWED_STATUSES` 前置校验 + `ai_review_status == "running"` 检查 | 已审批单不被回退 / 同一单不并发跑两次 | `services/expense_service.py` |
+| **乐观锁** | `version` 字段 + `WHERE version=?` + `rowcount` 校验 | 并发更新互相覆盖 | `models/expense.py` / `services/expense_service.py` |
+| **幂等键** | `idempotency_key` + 缓存表 `AIReviewCache` (5min TTL) | 重复请求不重跑 LLM / 不产生重复日志 | `core/idempotency.py` / `schemas/` |
 
 ### 事务拆分示意
 
@@ -327,13 +369,15 @@ POST /expense/{id}/ai-review ─┘
 ```bash
 # 后端
 cd backend
+python -m venv venv && venv\Scripts\activate  # Windows
+python3 -m venv venv && source venv/bin/activate  # Linux/macOS
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 
 # 前端
 cd frontend
-npm install
-npm run dev
+npm install        # 或用 pnpm install
+npm run dev         # 或用 pnpm dev
 ```
 
 ## 默认账号
@@ -344,9 +388,11 @@ npm run dev
 | 财务 | finance01 | finance123 |
 | 员工 | employee01 | employee123 |
 
+> 更多账号（财务/经理/员工各2-3个）见 [运行指南.md](./运行指南.md#6-默认账号)
+
 ## API文档
 
-启动后端后访问: http://localhost:8000/api/docs
+启动后端后访问: http://localhost:8000/docs
 
 ## 运行测试
 
@@ -356,12 +402,13 @@ pytest tests/ -v
 ```
 
 ```
-======================== 80 passed in 2.32s =========================
+======================== 84+ passed =========================
 
 test_rule_engine.py     (42 tests) — 规则引擎 + schema + builder + 边界
 test_workflow_routing.py (13 tests) — 条件路由 + enabled_agents
 test_graph.py          (10 tests) — 图编译 + Send并行 + 节点工厂
 test_api_regression.py (13 tests) — API回归 + fail-closed + 两入口统一
+test_services/          (N tests) — ★ Service 层（含 ai_review_presenter）
 test_conftest.py       (2 tests)  — fixtures
 ```
 

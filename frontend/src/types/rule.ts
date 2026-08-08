@@ -19,17 +19,19 @@ export const RuleExecModeLabels: Record<string, string> = {
 export type RuleAction   = 'reject' | 'warn' | 'require_approval'
 export type RuleExecMode = 'deterministic' | 'pre_computed' | 'semantic'
 
-/** 严格对齐后端 RuleResponse —— 注意：没有 created_at */
+/** 严格对齐后端 RuleResponse */
 export interface Rule {
   id: number
   name: string
   rule_type: string
   logic: Record<string, any>      // 存量数据可能是 {}
   action: RuleAction
-  message: string                 // 后端伪字段，恒为 `${name}不符合规则`
+  message: string                 // 自定义命中提示（后端持久化，为空时自动生成默认值）
   description?: string | null     // 实际映射 ORM 的 condition 列
   exec_mode: RuleExecMode
   is_active: boolean
+  created_at?: string | null      // 后端返回创建时间
+  updated_at?: string | null      // 后端返回更新时间
 }
 
 export interface RuleListResponse { total: number; items: Rule[] }
@@ -39,7 +41,7 @@ export interface RuleCreatePayload {
   rule_type: string
   logic: Record<string, any>      // 必填且必须非空
   action: RuleAction
-  message: string                 // 必填（否则 422），但后端不持久化
+  message: string                 // 必填，后端持久化，为空时自动生成默认文案
   description?: string
   exec_mode?: RuleExecMode
 }
